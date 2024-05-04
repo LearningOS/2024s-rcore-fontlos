@@ -1,6 +1,4 @@
 //! Types related to task management
-
-// 有序键值对
 use alloc::collections::BTreeMap;
 
 use super::TaskContext;
@@ -10,16 +8,43 @@ use crate::mm::{
 };
 use crate::trap::{trap_handler, TrapContext};
 
+/// 任务信息块
+pub struct TaskInfo {
+    /// Whether the task has already been dispatched
+    pub dispatched: bool,
+    /// Timestamp in ms of the first time this task being dispatched
+    pub start_time: usize,
+    /// Syscall times
+    pub syscall_times: BTreeMap<usize, u32>
+}
+impl TaskInfo {
+    /// empty info block
+    pub fn new() -> Self {
+        TaskInfo {
+            dispatched: false,
+            start_time: 0,
+            syscall_times: BTreeMap::new()
+        }
+    }
+    /// Set the timestamp to now if it's the first to be dispatched
+    pub fn dispatch(&mut self) {
+        if !self.dispatched {
+            self.start_time = crate::timer::get_time_ms();
+            self.dispatched = true;
+        }
+    }
+}
+
 /// The task control block (TCB) of a task.
 pub struct TaskControlBlock {
     /// Save task context
     pub task_cx: TaskContext,
 
+    /// task info block
+    pub task_info: TaskInfo,
+
     /// Maintain the execution status of the current process
     pub task_status: TaskStatus,
-
-    /// 任务信息块
-    pub task_info: TaskInfo,
 
     /// Application address space
     pub memory_set: MemorySet,
@@ -59,16 +84,16 @@ impl TaskControlBlock {
         let task_status = TaskStatus::Ready;
         // map a kernel-stack in kernel space
         let (kernel_stack_bottom, kernel_stack_top) = kernel_stack_position(app_id);
-        let kernel_stack_alloc = KERNEL_SPACE.exclusive_access().insert_framed_area(
+        let kernel_stack_alloc = KERNEL_SPACE.exclusive_access().insert_framed_area_strict(
             kernel_stack_bottom.into(),
             kernel_stack_top.into(),
             MapPermission::R | MapPermission::W,
         );
-        assert!(kernel_stack_alloc.is_ok(), "failed to allocate memory for app, id = {}, err = {}", app_id, kernel_stack_alloc.err().unwrap());
+        assert!(kernel_stack_alloc.is_ok(), "failed to allocate memory for kernel stack for appid = {}, err = {}", app_id, kernel_stack_alloc.err().unwrap());
         let task_control_block = Self {
             task_status,
-            task_info: TaskInfo::new(),
             task_cx: TaskContext::goto_trap_return(kernel_stack_top),
+            task_info: TaskInfo::new(),
             memory_set,
             trap_cx_ppn,
             base_size: user_sp,
@@ -105,35 +130,6 @@ impl TaskControlBlock {
             Some(old_break)
         } else {
             None
-        }
-    }
-}
-
-/// 任务信息块
-#[derive(Clone)]
-pub struct TaskInfo {
-    /// 任务是否进行
-    pub is_dispatched: bool,
-    /// 调度时间
-    pub start_time: usize,
-    /// 调用次数
-    pub syscall_times: BTreeMap<usize, u32>
-}
-
-impl TaskInfo {
-    /// 初始化任务信息
-    pub fn new() -> Self {
-        TaskInfo {
-            is_dispatched: false,
-            start_time: 0,
-            syscall_times: BTreeMap::new()
-        }
-    }
-    /// 开始调度
-    pub fn dispatch(&mut self) {
-        if !self.is_dispatched {
-            self.start_time = crate::timer::get_time_ms();
-            self.is_dispatched = true;
         }
     }
 }

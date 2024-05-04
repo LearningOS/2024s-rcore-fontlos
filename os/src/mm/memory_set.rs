@@ -4,7 +4,7 @@ use super::{MapArea, MapPermission, MapType};
 use super::{PTEFlags, PageTable, PageTableEntry};
 use super::{PhysAddr, VirtAddr, VirtPageNum};
 use super::VPNRange;
-use super::error::{AreaError, MemoryResult};
+use super::error::{AreaError, MMResult};
 use crate::config::{
     KERNEL_STACK_SIZE, MEMORY_END, PAGE_SIZE, TRAMPOLINE, TRAP_CONTEXT_BASE, USER_STACK_SIZE,
 };
@@ -41,7 +41,7 @@ pub struct MemorySet {
 
 impl MemorySet {
     /// Create a new empty `MemorySet`.
-    pub fn new_bare() -> MemoryResult<Self> {
+    pub fn new_bare() -> MMResult<Self> {
         let pt = PageTable::new()?;
         Ok(Self {
             page_table: pt,
@@ -52,48 +52,57 @@ impl MemorySet {
     pub fn token(&self) -> usize {
         self.page_table.token()
     }
-    /// Change: 防止插入冲突
-    pub fn insert_framed_area(
+    /// Insert framed area strictly
+    pub fn insert_framed_area_strict(
         &mut self,
         start_va: VirtAddr,
         end_va: VirtAddr,
         permission: MapPermission,
-    ) -> MemoryResult<()> {
+    ) -> MMResult<()> {
         self.push_strict(
             MapArea::new(start_va, end_va, MapType::Framed, permission),
             None,
         )
     }
-    /// 延迟插入
+    /// Insert framed area lazily
     pub fn insert_framed_area_lazy(
         &mut self,
         start_va: VirtAddr,
         end_va: VirtAddr,
         permission: MapPermission,
-    ) -> MemoryResult<()> {
+    ) -> MMResult<()> {
         self.push_lazy(
             MapArea::new(start_va, end_va, MapType::Framed, permission),
             None,
         )
     }
-    fn push_strict(&mut self, mut map_area: MapArea, data: Option<&[u8]>) -> MemoryResult<()> {
+    /// Push an area and **strictly** allocate frames for it
+    fn push_strict(&mut self, mut map_area: MapArea, data: Option<&[u8]>) -> MMResult<()> {
         map_area.map(&mut self.page_table)?;
         map_area.ensure_all(&mut self.page_table)?; // force allocation
         if let Some(data) = data {
             map_area.copy_data(&mut self.page_table, data)?;
         }
+        // if the above operations fails, then `map_area` is not kept and thus dropped, 
+        // in which case, all partially alllocated frames are collected again.
         self.areas.push(map_area);
         Ok(())
     }
-    fn push_lazy(&mut self, mut map_area: MapArea, data: Option<&[u8]>) -> MemoryResult<()> {
+    /// Push an area lazily.<br/>
+    /// Frames will be partially allocated if data is not `None`.<br/>
+    fn push_lazy(&mut self, mut map_area: MapArea, data: Option<&[u8]>) -> MMResult<()> {
         map_area.map(&mut self.page_table)?;
         if let Some(data) = data {
+            // `copy_data` will in turn call `translate` which ensures the requested page is prepared
             map_area.copy_data(&mut self.page_table, data)?;
         }
+        // if the above operations fails, then `map_area` is not kept and thus dropped, 
+        // in which case, all partially alllocated frames are collected again.
         self.areas.push(map_area);
         Ok(())
     }
-    fn map_trampoline(&mut self) -> MemoryResult<()> {
+    /// Mention that trampoline is not collected by areas.
+    fn map_trampoline(&mut self) -> MMResult<()> {
         self.page_table.map(
             VirtAddr::from(TRAMPOLINE).into(),
             PhysAddr::from(strampoline as usize).into(),
@@ -103,7 +112,9 @@ impl MemorySet {
     /// Without kernel stacks.
     pub fn new_kernel() -> Self {
         let memory_set = Self::new_bare();
-        assert!(memory_set.is_ok(), "failed to allocate kernel memory, err = {}", memory_set.err().unwrap());
+        // this cannot fail, as there's only one kernel space initialized on startup.
+        // if fails, the kernel should be slimmed.
+        assert!(memory_set.is_ok(), "failed to allocate kernel space, err = {}", memory_set.err().unwrap());
         let mut memory_set = memory_set.unwrap();
         // map trampoline
         memory_set.map_trampoline().unwrap();
@@ -115,7 +126,7 @@ impl MemorySet {
             ".bss [{:#x}, {:#x})",
             sbss_with_stack as usize, ebss as usize
         );
-        info!("Map .text section");
+        info!("mapping .text section");
         memory_set.push_lazy(
             MapArea::new(
                 (stext as usize).into(),
@@ -125,7 +136,7 @@ impl MemorySet {
             ),
             None,
         ).unwrap();
-        info!("Map .rodata section");
+        info!("mapping .rodata section");
         memory_set.push_lazy(
             MapArea::new(
                 (srodata as usize).into(),
@@ -135,7 +146,7 @@ impl MemorySet {
             ),
             None,
         ).unwrap();
-        info!("Map .data section");
+        info!("mapping .data section");
         memory_set.push_lazy(
             MapArea::new(
                 (sdata as usize).into(),
@@ -145,7 +156,7 @@ impl MemorySet {
             ),
             None,
         ).unwrap();
-        info!("Map .bss section");
+        info!("mapping .bss section");
         memory_set.push_lazy(
             MapArea::new(
                 (sbss_with_stack as usize).into(),
@@ -155,7 +166,7 @@ impl MemorySet {
             ),
             None,
         ).unwrap();
-        info!("Map physical memory");
+        info!("mapping physical memory");
         memory_set.push_lazy(
             MapArea::new(
                 (ekernel as usize).into(),
@@ -169,7 +180,7 @@ impl MemorySet {
     }
     /// Include sections in elf and trampoline and TrapContext and user stack,
     /// also returns user_sp_base and entry point.
-    pub fn from_elf(elf_data: &[u8]) -> MemoryResult<(Self, usize, usize)> {
+    pub fn from_elf(elf_data: &[u8]) -> MMResult<(Self, usize, usize)> {
         let mut memory_set = Self::new_bare()?;
         // map trampoline
         memory_set.map_trampoline()?;
@@ -198,6 +209,8 @@ impl MemorySet {
                 }
                 let map_area = MapArea::new(start_va, end_va, MapType::Framed, map_perm);
                 max_end_vpn = map_area.get_range().get_end();
+                // loaded area should always be strict, as they don't require more than needed,
+                // and for now we have no way for lazy load.
                 memory_set.push_strict(
                     map_area,
                     Some(&elf.input[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize]),
@@ -219,6 +232,7 @@ impl MemorySet {
             ),
             None,
         )?;
+        // used in sbrk
         memory_set.push_lazy(
             MapArea::new(
                 user_stack_top.into(),
@@ -228,7 +242,8 @@ impl MemorySet {
             ),
             None,
         )?;
-        memory_set.push_strict(
+        // map TrapContext
+        memory_set.push_strict( // CRITICAL: this must be strict so trap handling works normally
             MapArea::new(
                 TRAP_CONTEXT_BASE.into(),
                 TRAMPOLINE.into(),
@@ -252,7 +267,7 @@ impl MemorySet {
         }
     }
     #[allow(unused)]
-    fn find_area_ensure(&mut self, vpn: VirtPageNum) -> MemoryResult<()> {
+    fn find_area_ensure(&mut self, vpn: VirtPageNum) -> MMResult<()> {
         if let Some(area) = self.areas.iter_mut().find(|x|x.get_range().contains(&vpn)) {
             area.ensure_range(&mut self.page_table, VPNRange::by_len(vpn, 1))
         } else {
@@ -261,13 +276,13 @@ impl MemorySet {
     }
     /// Translate a virtual page number to a page table entry.<br/>
     /// Calling this function will forcibly allocate a frame for the requested page.
-    pub fn translate(&mut self, vpn: VirtPageNum) -> MemoryResult<PageTableEntry> {
+    pub fn translate(&mut self, vpn: VirtPageNum) -> MMResult<PageTableEntry> {
         self.find_area_ensure(vpn)?;
         self.page_table.translate(vpn)
     }
     /// shrink the area to new_end
     #[allow(unused)]
-    pub fn shrink_to(&mut self, start: VirtAddr, new_end: VirtAddr) -> MemoryResult<()> {
+    pub fn shrink_to(&mut self, start: VirtAddr, new_end: VirtAddr) -> MMResult<()> {
         if let Some(area) = self
             .areas
             .iter_mut()
@@ -281,7 +296,7 @@ impl MemorySet {
 
     /// append the area to new_end
     #[allow(unused)]
-    pub fn append_to(&mut self, start: VirtAddr, new_end: VirtAddr) -> MemoryResult<()> {
+    pub fn append_to(&mut self, start: VirtAddr, new_end: VirtAddr) -> MMResult<()> {
         if let Some(area) = self
             .areas
             .iter_mut()
@@ -306,10 +321,12 @@ impl MemorySet {
             let (_, _, rem) = x.get_range().exclude(&range);
             rem.into_iter().count()
         }).sum::<usize>();
+        
         let expected = range.into_iter().count();
         count != expected
     }
 
+    /// Gets whether the specified virtual page is critical and thus cannot be unmapped.
     fn is_critical(&self, vpn: VirtPageNum) -> bool {
         if vpn == VirtPageNum::from(VirtAddr::from(TRAMPOLINE)) {
             return true;
@@ -319,13 +336,13 @@ impl MemorySet {
         return false;
     }
 
-    /// 尝试映射虚拟内存
-    pub fn map_memory(
+    /// Try to map virtual address range, with memory not allocated until actual use.
+    pub fn mmap(
         &mut self,
         start_va: VirtAddr,
         end_va: VirtAddr,
         permission: MapPermission,
-    ) -> MemoryResult<()>  {
+    ) -> MMResult<()>  {
         let area = MapArea::new(start_va, end_va, MapType::Framed, permission);
         if area.get_range().into_iter().any(|x|self.is_critical(x)) {
             return Err(AreaError::AreaCritical.into());
@@ -339,12 +356,13 @@ impl MemorySet {
         )
     }
 
-    /// 尝试取消映射除关键内存之外的虚拟内存
-    pub fn unmap_memory(
+    /// Try to unmap virtual address range, except for **critical mappings** such as `TRAMPOLINE` and `TRAP_CONTEXT_BASE`.
+    /// One area will be split into two if it's unmapped in the middle.
+    pub fn munmap(
         &mut self,
         start_va: VirtAddr,
         end_va: VirtAddr,
-    ) -> MemoryResult<()>  {
+    ) -> MMResult<()>  {
         let target_range = VPNRange::new(start_va.floor(), end_va.ceil());
         if target_range.into_iter().any(|x|self.is_critical(x)) {
             return Err(AreaError::AreaCritical.into());
@@ -354,13 +372,16 @@ impl MemorySet {
         }
         let areas = core::mem::take(&mut self.areas);
         for area in areas.into_iter() {
+            // compute ranges
             let (l, _, rem) = area.get_range().exclude(&target_range);
-            if rem.is_empty() {
+            if rem.is_empty() { // nothing to remove in this area, push and skip
                 self.areas.push(area);
                 continue;
             }
             let (larea, rarea) = area.split(l.get_end());
             let (mut marea, rarea) = rarea.split(rem.get_end());
+            // now `larea`/`rarea` are the left/right parts to preserve, respectively
+            // if some of them are empty, then there's no need to push back
             if !larea.get_range().is_empty() {
                 self.areas.push(larea);
             }
@@ -368,10 +389,11 @@ impl MemorySet {
                 self.areas.push(rarea);
             }
             marea.unmap(&mut self.page_table)?;
-            drop(marea);
+            drop(marea); // this can be omitted, but I choose to make it clear that `marea` is collected
         }
         Ok(())
     }
+
 }
 
 /// Return (bottom, top) of a kernel stack in kernel space.

@@ -1,7 +1,7 @@
 use alloc::collections::BTreeMap;
 
 use crate::{config::PAGE_SIZE, mm::address::StepByOne};
-use super::{frame_alloc, FrameTracker, MemoryError, MemoryResult, PageError, PhysPageNum, VirtAddr, VirtPageNum};
+use super::{frame_alloc, FrameTracker, MMError, MMResult, PageError, PhysPageNum, VirtAddr, VirtPageNum};
 use super::address::VPNRange;
 use super::page_table::{PTEFlags, PageTable};
 
@@ -71,9 +71,9 @@ impl MapArea {
     }
 
     /// Do not call this function directly
-    fn ensure_page_raw(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) -> MemoryResult<()> {
+    fn ensure_page_raw(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) -> MMResult<()> {
         if !self.data_frames.contains_key(&vpn) {
-            let frame = frame_alloc().ok_or(MemoryError::MemoryNotEnough)?;
+            let frame = frame_alloc().ok_or(MMError::MemoryNotEnough)?;
             let ppn = frame.ppn;
             self.data_frames.insert(vpn, frame);
             let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
@@ -89,7 +89,7 @@ impl MapArea {
     }
     /// ensure the intersection of the specified range
     #[allow(unused)]
-    pub fn ensure_range(&mut self, page_table: &mut PageTable, vpn_range: VPNRange) -> MemoryResult<()> {
+    pub fn ensure_range(&mut self, page_table: &mut PageTable, vpn_range: VPNRange) -> MMResult<()> {
         match self.map_type {
             MapType::Identical => Ok(()),
             MapType::Framed => {
@@ -102,13 +102,13 @@ impl MapArea {
         }
     }
     /// ensure all virtual pages to be mapped
-    pub fn ensure_all(&mut self, page_table: &mut PageTable) -> MemoryResult<()> {
+    pub fn ensure_all(&mut self, page_table: &mut PageTable) -> MMResult<()> {
         self.ensure_range(page_table, self.vpn_range)
     }
 
     /// For identity mappings, this function will map them all in page table.<br/>
     /// While for framed mappings, this function only emit an area but without actually allocating frames.
-    fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) -> MemoryResult<()> {
+    fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) -> MMResult<()> {
         match self.map_type {
             MapType::Identical => {
                 let ppn = PhysPageNum(vpn.0);
@@ -123,19 +123,19 @@ impl MapArea {
 
     /// unmap one virtual page, won't return error if the virtual page is not mapped
     #[allow(unused)]
-    fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) -> MemoryResult<()> {
+    fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) -> MMResult<()> {
         if self.map_type == MapType::Framed {
             self.data_frames.remove(&vpn); // if there is mapped frame, then it's dropped
         }
         match page_table.unmap(vpn) {
             Ok(_) => Ok(()),
-            Err(MemoryError::PageError(PageError::DirPageInvalid)) => Ok(()),
-            Err(MemoryError::PageError(PageError::PageInvalid)) => Ok(()),
+            Err(MMError::PageError(PageError::DirPageInvalid)) => Ok(()), // this error also indicates the frame is not prepared
+            Err(MMError::PageError(PageError::PageInvalid)) => Ok(()),
             Err(e) => Err(e)
         }
     }
     /// Map the whole area, but without allocating frames stricly.
-    pub fn map(&mut self, page_table: &mut PageTable) -> MemoryResult<()> {
+    pub fn map(&mut self, page_table: &mut PageTable) -> MMResult<()> {
         for vpn in self.vpn_range {
             match self.map_one(page_table, vpn) {
                 Ok(_) => {},
@@ -146,7 +146,7 @@ impl MapArea {
     }
 
     /// unmap the whole area
-    pub fn unmap(&mut self, page_table: &mut PageTable) -> MemoryResult<()> {
+    pub fn unmap(&mut self, page_table: &mut PageTable) -> MMResult<()> {
         for vpn in self.vpn_range {
             match self.unmap_one(page_table, vpn) {
                 Ok(_) => {},
@@ -160,7 +160,7 @@ impl MapArea {
 
     /// shrink the area to a new end
     #[allow(unused)]
-    pub fn shrink_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) -> MemoryResult<()> {
+    pub fn shrink_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) -> MMResult<()> {
         for vpn in VPNRange::new(new_end, self.vpn_range.get_end()) {
             match self.unmap_one(page_table, vpn) {
                 Ok(_) => {},
@@ -173,7 +173,7 @@ impl MapArea {
 
     /// expand the area to a new end
     #[allow(unused)]
-    pub fn append_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) -> MemoryResult<()> {
+    pub fn append_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) -> MMResult<()> {
         for vpn in VPNRange::new(self.vpn_range.get_end(), new_end) {
             match self.map_one(page_table, vpn) {
                 Ok(_) => {},
@@ -186,7 +186,7 @@ impl MapArea {
     /// data: start-aligned but maybe with shorter length.<br/>
     /// assume that all frames were cleared before.<br/>
     /// This function will ensure that required frames are allocated before actually copying data.
-    pub fn copy_data(&mut self, page_table: &mut PageTable, data: &[u8]) -> MemoryResult<()> {
+    pub fn copy_data(&mut self, page_table: &mut PageTable, data: &[u8]) -> MMResult<()> {
         assert_eq!(self.map_type, MapType::Framed);
         let pages = (data.len() - 1 + PAGE_SIZE) / PAGE_SIZE;
         assert!(pages <= self.vpn_range.into_iter().count()); // data's length cannot exceed the area size
