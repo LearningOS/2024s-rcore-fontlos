@@ -2,7 +2,6 @@
 
 - 重写`sys_get_time`和`sys_task_info`
 - 实现 `sys_mmap` 和 `sys_munmap`, 惰性页面分配
-- 实现更好的错误处理
 
 # 问答题
 

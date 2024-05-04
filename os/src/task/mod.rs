@@ -15,13 +15,13 @@ mod switch;
 mod task;
 
 use crate::loader::{get_app_data, get_num_app};
-use crate::mm::{MMResult, MapPermission, PagePermissionError, VirtAddr};
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
+use crate::timer::get_time_ms;
 use alloc::vec::Vec;
 use lazy_static::*;
 use switch::__switch;
-pub use task::{TaskControlBlock, TaskStatus};
+pub use task::{TaskControlBlock, TaskStatus, TaskInfo};
 
 pub use context::TaskContext;
 
@@ -80,7 +80,7 @@ impl TaskManager {
         let mut inner = self.inner.exclusive_access();
         let next_task = &mut inner.tasks[0];
         next_task.task_status = TaskStatus::Running;
-        next_task.task_info.set_timestamp_if_first_dispatched(); // set dispatched_time
+        next_task.task_start_time = get_time_ms();
         let next_task_cx_ptr = &next_task.task_cx as *const TaskContext;
         drop(inner);
         let mut _unused = TaskContext::zero_init();
@@ -143,7 +143,6 @@ impl TaskManager {
             let current = inner.current_task;
             inner.tasks[next].task_status = TaskStatus::Running;
             inner.current_task = next;
-            inner.tasks[next].task_info.set_timestamp_if_first_dispatched(); // set dispatched_time
             let current_task_cx_ptr = &mut inner.tasks[current].task_cx as *mut TaskContext;
             let next_task_cx_ptr = &inner.tasks[next].task_cx as *const TaskContext;
             drop(inner);
@@ -156,96 +155,44 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
-    /// Increment syscall count for the given id, by one
-    pub fn inc_syscall_times(&self, syscall_id: usize) {
+
+    fn update_task_info(&self, syscall: usize, add_flag: bool) {
         let mut inner = self.inner.exclusive_access();
         let current = inner.current_task;
-        let times = &mut inner.tasks[current].task_info.syscall_times;
-        *times.entry(syscall_id).or_default() += 1;
-    }
-    
-    /// Get dispatched time.
-    pub fn get_dispatched_time(&self) -> usize {
-        let inner = self.inner.exclusive_access();
-        let current = inner.current_task;
-        inner.tasks[current].task_info.dispatched_time
-    }
-    
-    /// Get syscall times
-    fn get_syscall_times(&self, map: &mut [u32]) {
-        let inner = self.inner.exclusive_access();
-        let current = inner.current_task;
-        for (id, n) in inner.tasks[current].task_info.syscall_times.iter() {
-            map[*id] = *n;
+        let task_status = inner.tasks[current].task_status;
+        inner.tasks[current].task_info.set_status(task_status);
+        if add_flag {
+            inner.tasks[current].task_info.add_syscall_time(syscall);
         }
+
     }
 
-    /// Get task status of the current task.
-    fn get_task_status(&self) -> TaskStatus {
-        let inner = self.inner.exclusive_access();
+    fn get_current_task_info(&self) -> TaskInfo {
+        self.update_task_info(0,false);
+        let mut inner = self.inner.exclusive_access();
         let current = inner.current_task;
-        inner.tasks[current].task_status
+        let task_start_time = inner.tasks[current].task_start_time;
+        let increment_time = get_time_ms()-0;
+        println!("[Kernel][Task] get_time_ms = {}", get_time_ms());
+        println!("[Kernel][Task] task_start_time = {}", task_start_time);
+        println!("[Kernel][Task] increment_time = {}", increment_time);
+        inner.tasks[current].task_info.increment_time(increment_time);
+        let task_info = inner.tasks[current].task_info;
+        task_info
     }
 
-    /// Map virtual page to physical page
-    fn mmap(&self, start_va: VirtAddr, end_va: VirtAddr, permission: MapPermission) -> isize {
+    fn current_task_m_map(&self, start: usize, len: usize, port: usize) -> isize {
+        println!("[Kernel][task/mod]m_map");
         let mut inner = self.inner.exclusive_access();
         let current = inner.current_task;
-        let memset = &mut inner.tasks[current].memory_set;
-        if memset.mmap(start_va, end_va, permission).is_ok() {
-            0
-        } else {
-            -1
-        }
+        inner.tasks[current].m_map(start, len, port)
     }
 
-    /// Unmap virtual page
-    fn munmap(&self, start_va: VirtAddr, end_va: VirtAddr) -> isize {
+    fn current_task_m_unmap(&self, start: usize, len: usize) -> isize {
+        println!("[Kernel][task/mod]m_unmap");
         let mut inner = self.inner.exclusive_access();
         let current = inner.current_task;
-        let memset = &mut inner.tasks[current].memory_set;
-        if memset.munmap(start_va, end_va).is_ok() {
-            0
-        } else {
-            -1
-        }
-    }
-
-    /// Ensure the executable virtual page
-    pub fn ensure_page_exec(&self, va: VirtAddr) -> MMResult<()> {
-        let mut inner = self.inner.exclusive_access();
-        let current = inner.current_task;
-        let memset = &mut inner.tasks[current].memory_set;
-        let a = memset.translate(va.floor())?;
-        if a.readable() && a.executable() {
-            Ok(())
-        } else {
-            Err(PagePermissionError::NotExecutable.into())
-        }
-    }
-    /// Ensure the executable virtual page
-    pub fn ensure_page_read(&self, va: VirtAddr) -> MMResult<()> {
-        let mut inner = self.inner.exclusive_access();
-        let current = inner.current_task;
-        let memset = &mut inner.tasks[current].memory_set;
-        let a = memset.translate(va.floor())?;
-        if a.readable() {
-            Ok(())
-        } else {
-            Err(PagePermissionError::NotReadable.into())
-        }
-    }
-    /// Ensure the executable virtual page
-    pub fn ensure_page_write(&self, va: VirtAddr) -> MMResult<()> {
-        let mut inner = self.inner.exclusive_access();
-        let current = inner.current_task;
-        let memset = &mut inner.tasks[current].memory_set;
-        let a = memset.translate(va.floor())?;
-        if a.readable() && a.writable() {
-            Ok(())
-        } else {
-            Err(PagePermissionError::NotWritable.into())
-        }
+        inner.tasks[current].m_unmap(start, len)
     }
 }
 
@@ -297,45 +244,19 @@ pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
 }
 
-/// Increment syscall count for the given id, by one
-pub fn inc_syscall_times(syscall_id: usize) {
-    TASK_MANAGER.inc_syscall_times(syscall_id);
+/// Exit the current 'Running' task and run the next task in task list.
+pub fn get_current_task_status() -> TaskInfo {
+    TASK_MANAGER.get_current_task_info()
 }
 
-/// Get task status of the current task
-pub fn get_task_status() -> TaskStatus {
-    TASK_MANAGER.get_task_status()
+pub fn add_task_syscall_times(syscall: usize){
+    TASK_MANAGER.update_task_info(syscall, true);
 }
 
-/// Get syscall times
-pub fn get_syscall_times(map: &mut [u32]) {
-    TASK_MANAGER.get_syscall_times(map)
+pub fn current_task_m_map(start: usize, len: usize, port: usize) -> isize {
+    TASK_MANAGER.current_task_m_map(start, len, port)
 }
 
-/// Get dispatched time.
-pub fn get_dispatched_time() -> usize {
-    TASK_MANAGER.get_dispatched_time()
-}
-
-/// Map virtual page to physical page
-pub fn mmap(start_va: VirtAddr, end_va: VirtAddr, permission: MapPermission) -> isize {
-    TASK_MANAGER.mmap(start_va, end_va, permission)
-}
-
-/// Unmap virtual page
-pub fn munmap(start_va: VirtAddr, end_va: VirtAddr) -> isize {
-    TASK_MANAGER.munmap(start_va, end_va)
-}
-
-/// Ensure the virtual page by allocating a frame for it
-pub fn ensure_page_exec(va: VirtAddr) -> MMResult<()> {
-    TASK_MANAGER.ensure_page_exec(va)
-}
-/// Ensure the virtual page by allocating a frame for it
-pub fn ensure_page_read(va: VirtAddr) -> MMResult<()> {
-    TASK_MANAGER.ensure_page_read(va)
-}
-/// Ensure the virtual page by allocating a frame for it
-pub fn ensure_page_write(va: VirtAddr) -> MMResult<()> {
-    TASK_MANAGER.ensure_page_write(va)
+pub fn current_task_m_unmap(start: usize, len: usize) -> isize {
+    TASK_MANAGER.current_task_m_unmap(start, len)
 }
