@@ -15,13 +15,13 @@ mod switch;
 mod task;
 
 use crate::loader::{get_app_data, get_num_app};
+use crate::mm::{MemoryResult, MapPermission, PagePermissionError, VirtAddr};
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
-use crate::timer::get_time_ms;
 use alloc::vec::Vec;
 use lazy_static::*;
 use switch::__switch;
-pub use task::{TaskControlBlock, TaskStatus, TaskInfo};
+pub use task::{TaskControlBlock, TaskStatus};
 
 pub use context::TaskContext;
 
@@ -80,7 +80,8 @@ impl TaskManager {
         let mut inner = self.inner.exclusive_access();
         let next_task = &mut inner.tasks[0];
         next_task.task_status = TaskStatus::Running;
-        next_task.task_start_time = get_time_ms();
+        // 开始调度
+        next_task.task_info.dispatch();
         let next_task_cx_ptr = &next_task.task_cx as *const TaskContext;
         drop(inner);
         let mut _unused = TaskContext::zero_init();
@@ -143,6 +144,8 @@ impl TaskManager {
             let current = inner.current_task;
             inner.tasks[next].task_status = TaskStatus::Running;
             inner.current_task = next;
+            // 开始调度
+            inner.tasks[next].task_info.dispatch();
             let current_task_cx_ptr = &mut inner.tasks[current].task_cx as *mut TaskContext;
             let next_task_cx_ptr = &inner.tasks[next].task_cx as *const TaskContext;
             drop(inner);
@@ -156,43 +159,98 @@ impl TaskManager {
         }
     }
 
-    fn update_task_info(&self, syscall: usize, add_flag: bool) {
-        let mut inner = self.inner.exclusive_access();
+    // 获取当前任务状态
+    fn get_task_status(&self) -> TaskStatus {
+        let inner = self.inner.exclusive_access();
         let current = inner.current_task;
-        let task_status = inner.tasks[current].task_status;
-        inner.tasks[current].task_info.set_status(task_status);
-        if add_flag {
-            inner.tasks[current].task_info.add_syscall_time(syscall);
+        inner.tasks[current].task_status
+    }
+
+    /// 获取调度起始时间
+    pub fn get_start_time(&self) -> usize {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].task_info.start_time
+    }
+
+    // syscall 调用次数的映射表
+    fn set_syscall_times(&self, syscalls: &mut [u32; crate::config::MAX_SYSCALL_NUM]) {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        for (id, n) in inner.tasks[current].task_info.syscall_times.iter() {
+            syscalls[*id] = *n;
         }
-
     }
 
-    fn get_current_task_info(&self) -> TaskInfo {
-        self.update_task_info(0,false);
+    /// 针对 id 的 syscall 调用次数计数器
+    pub fn syscall_counter(&self, syscall_id: usize) {
         let mut inner = self.inner.exclusive_access();
         let current = inner.current_task;
-        let task_start_time = inner.tasks[current].task_start_time;
-        let increment_time = get_time_ms()-0;
-        println!("[Kernel][Task] get_time_ms = {}", get_time_ms());
-        println!("[Kernel][Task] task_start_time = {}", task_start_time);
-        println!("[Kernel][Task] increment_time = {}", increment_time);
-        inner.tasks[current].task_info.increment_time(increment_time);
-        let task_info = inner.tasks[current].task_info;
-        task_info
+        let times = &mut inner.tasks[current].task_info.syscall_times;
+        // 保存每个 syscall 的调用次数, 谨防 syscall_id 无效
+        *times.entry(syscall_id).or_default() += 1;
     }
 
-    fn current_task_m_map(&self, start: usize, len: usize, port: usize) -> isize {
-        println!("[Kernel][task/mod]m_map");
+    /// 虚拟内存与物理内存的映射
+    fn map_memory(&self, start_virtaddr: VirtAddr, end_virtaddr: VirtAddr, permission: MapPermission) -> isize {
         let mut inner = self.inner.exclusive_access();
         let current = inner.current_task;
-        inner.tasks[current].m_map(start, len, port)
+        let memset = &mut inner.tasks[current].memory_set;
+        if memset.map_memory(start_virtaddr, end_virtaddr, permission).is_ok() {
+            0
+        } else {
+            -1
+        }
     }
 
-    fn current_task_m_unmap(&self, start: usize, len: usize) -> isize {
-        println!("[Kernel][task/mod]m_unmap");
+    /// 取消映射
+    fn unmap_memory(&self, start_virtaddr: VirtAddr, end_virtaddr: VirtAddr) -> isize {
         let mut inner = self.inner.exclusive_access();
         let current = inner.current_task;
-        inner.tasks[current].m_unmap(start, len)
+        let memset = &mut inner.tasks[current].memory_set;
+        if memset.unmap_memory(start_virtaddr, end_virtaddr).is_ok() {
+            0
+        } else {
+            -1
+        }
+    }
+
+    /// 检查可读性
+    pub fn check_readable(&self, va: VirtAddr) -> MemoryResult<()> {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let memset = &mut inner.tasks[current].memory_set;
+        let a = memset.transform(va.floor())?;
+        if a.readable() {
+            Ok(())
+        } else {
+            Err(PagePermissionError::Unreadable.into())
+        }
+    }
+    /// 检查可写性
+    pub fn check_writeable(&self, va: VirtAddr) -> MemoryResult<()> {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let memset = &mut inner.tasks[current].memory_set;
+        let a = memset.transform(va.floor())?;
+        if a.readable() && a.writable() {
+            Ok(())
+        } else {
+            Err(PagePermissionError::Unwritable.into())
+        }
+    }
+
+    /// 检查可执行性
+    pub fn check_executable(&self, va: VirtAddr) -> MemoryResult<()> {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let memset = &mut inner.tasks[current].memory_set;
+        let a = memset.transform(va.floor())?;
+        if a.readable() && a.executable() {
+            Ok(())
+        } else {
+            Err(PagePermissionError::Unexecutable.into())
+        }
     }
 }
 
@@ -244,19 +302,46 @@ pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
 }
 
-/// Exit the current 'Running' task and run the next task in task list.
-pub fn get_current_task_status() -> TaskInfo {
-    TASK_MANAGER.get_current_task_info()
+/// 获取当前任务状态
+pub fn get_task_status() -> TaskStatus {
+    TASK_MANAGER.get_task_status()
 }
 
-pub fn add_task_syscall_times(syscall: usize){
-    TASK_MANAGER.update_task_info(syscall, true);
+/// 获取调度起始时间
+pub fn get_start_time() -> usize {
+    TASK_MANAGER.get_start_time()
 }
 
-pub fn current_task_m_map(start: usize, len: usize, port: usize) -> isize {
-    TASK_MANAGER.current_task_m_map(start, len, port)
+/// 设置 syscall 调用次数
+pub fn set_syscall_times(syscalls: &mut [u32; crate::config::MAX_SYSCALL_NUM]) {
+    TASK_MANAGER.set_syscall_times(syscalls)
 }
 
-pub fn current_task_m_unmap(start: usize, len: usize) -> isize {
-    TASK_MANAGER.current_task_m_unmap(start, len)
+/// 针对 id 的系统调用计数器
+pub fn syscall_counter(syscall_id: usize) {
+    TASK_MANAGER.syscall_counter(syscall_id);
+}
+
+/// 虚拟内存与物理内存的映射
+pub fn map_memory(start_virtaddr: VirtAddr, end_virtaddr: VirtAddr, permission: MapPermission) -> isize {
+    TASK_MANAGER.map_memory(start_virtaddr, end_virtaddr, permission)
+}
+
+/// 取消映射
+pub fn unmap_memory(start_virtaddr: VirtAddr, end_virtaddr: VirtAddr) -> isize {
+    TASK_MANAGER.unmap_memory(start_virtaddr, end_virtaddr)
+}
+
+/// 检查可读性
+pub fn check_readable(va: VirtAddr) -> MemoryResult<()> {
+    TASK_MANAGER.check_readable(va)
+}
+/// 检查可写性
+pub fn check_writeable(va: VirtAddr) -> MemoryResult<()> {
+    TASK_MANAGER.check_writeable(va)
+}
+
+/// 检查可执行性
+pub fn check_executable(va: VirtAddr) -> MemoryResult<()> {
+    TASK_MANAGER.check_executable(va)
 }
