@@ -5,27 +5,31 @@ use alloc::string::ToString;
 /// Errors related to page permission
 #[derive(Debug)]
 pub enum PagePermissionError {
-    /// 不可执行
-    Unexecutable,
-    /// 不可读
-    Unreadable,
-    /// 不可写
-    Unwritable,
-    /// 用户无权访问
-    Unaccessible,
+    /// not executable
+    NotExecutable,
+    /// not readable
+    NotReadable,
+    /// not writable
+    NotWritable,
+    /// not user accessible
+    NotUserAccessible,
 }
 
 /// Errors related to page mapping
 #[derive(Debug)]
 pub enum PageError {
-    /// 无效的目录页
-    DirPageInvalid,
-    /// 页已分配
-    PageAlreadyAlloc,
-    /// 无效页
+    /// returned when intermediate directory pages are invalid,
+    /// often returned from some non-creating search process.
+    InvalidDirPage,
+
+    /// indicates that the requested virtual page has already been `valid`
+    PageAlreadyValid,
+
+    /// indicates that the requested virtual page has not yet been `valid`
     PageInvalid,
-    /// 权限错误
-    PermissionError(PagePermissionError)
+
+    /// indicates that operation is to a page of unexpected permission
+    PageUnexpectedPermission(PagePermissionError)
 }
 
 /// Errors related to area management
@@ -48,11 +52,11 @@ pub enum AreaError {
 /// Errors related to memory management
 #[derive(Debug)]
 pub enum MMError {
-    /// 内存不足
-    MemoryNotEnough,
-    /// 分页错误
+    /// when allocatable memory too low
+    NotEnoughMemory,
+    /// page error
     PageError(PageError),
-    /// 内存区域错误
+    /// area error
     AreaError(AreaError)
 }
 
@@ -62,7 +66,7 @@ pub type MMResult<R> = core::result::Result<R, MMError>;
 impl Display for MMError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            MMError::MemoryNotEnough => f.write_str("NotEnoughMemory"),
+            MMError::NotEnoughMemory => f.write_str("NotEnoughMemory"),
             MMError::PageError(pe) => f.write_str(pe.to_string().as_str()),
             MMError::AreaError(ae) => f.write_str(ae.to_string().as_str()),
         }
@@ -72,10 +76,10 @@ impl Display for MMError {
 impl Display for PagePermissionError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            PagePermissionError::Unexecutable => f.write_str("NotExecutable"),
-            PagePermissionError::Unreadable => f.write_str("NotReadable"),
-            PagePermissionError::Unwritable => f.write_str("NotWritable"),
-            PagePermissionError::Unaccessible => f.write_str("NotUserAccessible"),
+            PagePermissionError::NotExecutable => f.write_str("NotExecutable"),
+            PagePermissionError::NotReadable => f.write_str("NotReadable"),
+            PagePermissionError::NotWritable => f.write_str("NotWritable"),
+            PagePermissionError::NotUserAccessible => f.write_str("NotUserAccessible"),
         }
     }
 }
@@ -83,10 +87,10 @@ impl Display for PagePermissionError {
 impl Display for PageError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            PageError::DirPageInvalid => f.write_str("InvalidDirPage"),
-            PageError::PageAlreadyAlloc => f.write_str("PageAlreadyValid"),
+            PageError::InvalidDirPage => f.write_str("InvalidDirPage"),
+            PageError::PageAlreadyValid => f.write_str("PageAlreadyValid"),
             PageError::PageInvalid => f.write_str("PageInvalid"),
-            PageError::PermissionError(e) => f.write_str(e.to_string().as_str()),
+            PageError::PageUnexpectedPermission(e) => f.write_str(e.to_string().as_str()),
         }
     }
 }
@@ -115,6 +119,6 @@ impl From<AreaError> for MMError {
 }
 impl From<PagePermissionError> for MMError {
     fn from(value: PagePermissionError) -> Self {
-        Self::PageError(PageError::PermissionError(value))
+        Self::PageError(PageError::PageUnexpectedPermission(value))
     }
 }

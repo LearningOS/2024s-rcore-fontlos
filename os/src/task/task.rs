@@ -8,28 +8,28 @@ use crate::mm::{
 };
 use crate::trap::{trap_handler, TrapContext};
 
-/// 任务信息块
-pub struct TaskInfo {
+/// Holds task info. <br/>
+pub struct TaskInfoBlock {
     /// Whether the task has already been dispatched
     pub dispatched: bool,
     /// Timestamp in ms of the first time this task being dispatched
-    pub start_time: usize,
+    pub dispatched_time: usize,
     /// Syscall times
     pub syscall_times: BTreeMap<usize, u32>
 }
-impl TaskInfo {
+impl TaskInfoBlock {
     /// empty info block
     pub fn new() -> Self {
-        TaskInfo {
+        TaskInfoBlock {
             dispatched: false,
-            start_time: 0,
+            dispatched_time: 0,
             syscall_times: BTreeMap::new()
         }
     }
     /// Set the timestamp to now if it's the first to be dispatched
-    pub fn dispatch(&mut self) {
+    pub fn set_timestamp_if_first_dispatched(&mut self) {
         if !self.dispatched {
-            self.start_time = crate::timer::get_time_ms();
+            self.dispatched_time = crate::timer::get_time_ms();
             self.dispatched = true;
         }
     }
@@ -41,7 +41,7 @@ pub struct TaskControlBlock {
     pub task_cx: TaskContext,
 
     /// task info block
-    pub task_info: TaskInfo,
+    pub task_info: TaskInfoBlock,
 
     /// Maintain the execution status of the current process
     pub task_status: TaskStatus,
@@ -93,7 +93,7 @@ impl TaskControlBlock {
         let task_control_block = Self {
             task_status,
             task_cx: TaskContext::goto_trap_return(kernel_stack_top),
-            task_info: TaskInfo::new(),
+            task_info: TaskInfoBlock::new(),
             memory_set,
             trap_cx_ppn,
             base_size: user_sp,

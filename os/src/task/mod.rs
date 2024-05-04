@@ -80,7 +80,7 @@ impl TaskManager {
         let mut inner = self.inner.exclusive_access();
         let next_task = &mut inner.tasks[0];
         next_task.task_status = TaskStatus::Running;
-        next_task.task_info.dispatch(); // set dispatched_time
+        next_task.task_info.set_timestamp_if_first_dispatched(); // set dispatched_time
         let next_task_cx_ptr = &next_task.task_cx as *const TaskContext;
         drop(inner);
         let mut _unused = TaskContext::zero_init();
@@ -143,7 +143,7 @@ impl TaskManager {
             let current = inner.current_task;
             inner.tasks[next].task_status = TaskStatus::Running;
             inner.current_task = next;
-            inner.tasks[next].task_info.dispatch();
+            inner.tasks[next].task_info.set_timestamp_if_first_dispatched(); // set dispatched_time
             let current_task_cx_ptr = &mut inner.tasks[current].task_cx as *mut TaskContext;
             let next_task_cx_ptr = &inner.tasks[next].task_cx as *const TaskContext;
             drop(inner);
@@ -156,36 +156,35 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
-
-    // 获取当前任务状态
-    fn get_task_status(&self) -> TaskStatus {
-        let inner = self.inner.exclusive_access();
-        let current = inner.current_task;
-        inner.tasks[current].task_status
-    }
-
-    /// 获取调度起始时间
-    pub fn get_start_time(&self) -> usize {
-        let inner = self.inner.exclusive_access();
-        let current = inner.current_task;
-        inner.tasks[current].task_info.start_time
-    }
-
-    // syscall 调用次数的映射表
-    fn set_syscall_times(&self, syscalls: &mut [u32]) {
-        let inner = self.inner.exclusive_access();
-        let current = inner.current_task;
-        for (id, n) in inner.tasks[current].task_info.syscall_times.iter() {
-            syscalls[*id] = *n;
-        }
-    }
-
-    /// 针对 id 的 syscall 调用次数计数器
-    pub fn syscall_counter(&self, syscall_id: usize) {
+    /// Increment syscall count for the given id, by one
+    pub fn inc_syscall_times(&self, syscall_id: usize) {
         let mut inner = self.inner.exclusive_access();
         let current = inner.current_task;
         let times = &mut inner.tasks[current].task_info.syscall_times;
         *times.entry(syscall_id).or_default() += 1;
+    }
+    
+    /// Get dispatched time.
+    pub fn get_dispatched_time(&self) -> usize {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].task_info.dispatched_time
+    }
+    
+    /// Get syscall times
+    fn get_syscall_times(&self, map: &mut [u32]) {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        for (id, n) in inner.tasks[current].task_info.syscall_times.iter() {
+            map[*id] = *n;
+        }
+    }
+
+    /// Get task status of the current task.
+    fn get_task_status(&self) -> TaskStatus {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].task_status
     }
 
     /// Map virtual page to physical page
@@ -212,33 +211,8 @@ impl TaskManager {
         }
     }
 
-    /// 检查可读性
-    pub fn check_readable(&self, va: VirtAddr) -> MMResult<()> {
-        let mut inner = self.inner.exclusive_access();
-        let current = inner.current_task;
-        let memset = &mut inner.tasks[current].memory_set;
-        let a = memset.translate(va.floor())?;
-        if a.readable() {
-            Ok(())
-        } else {
-            Err(PagePermissionError::Unreadable.into())
-        }
-    }
-    /// 检查可写性
-    pub fn check_writeable(&self, va: VirtAddr) -> MMResult<()> {
-        let mut inner = self.inner.exclusive_access();
-        let current = inner.current_task;
-        let memset = &mut inner.tasks[current].memory_set;
-        let a = memset.translate(va.floor())?;
-        if a.readable() && a.writable() {
-            Ok(())
-        } else {
-            Err(PagePermissionError::Unwritable.into())
-        }
-    }
-
-    /// 检查可执行性
-    pub fn check_executable(&self, va: VirtAddr) -> MMResult<()> {
+    /// Ensure the executable virtual page
+    pub fn ensure_page_exec(&self, va: VirtAddr) -> MMResult<()> {
         let mut inner = self.inner.exclusive_access();
         let current = inner.current_task;
         let memset = &mut inner.tasks[current].memory_set;
@@ -246,7 +220,31 @@ impl TaskManager {
         if a.readable() && a.executable() {
             Ok(())
         } else {
-            Err(PagePermissionError::Unexecutable.into())
+            Err(PagePermissionError::NotExecutable.into())
+        }
+    }
+    /// Ensure the executable virtual page
+    pub fn ensure_page_read(&self, va: VirtAddr) -> MMResult<()> {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let memset = &mut inner.tasks[current].memory_set;
+        let a = memset.translate(va.floor())?;
+        if a.readable() {
+            Ok(())
+        } else {
+            Err(PagePermissionError::NotReadable.into())
+        }
+    }
+    /// Ensure the executable virtual page
+    pub fn ensure_page_write(&self, va: VirtAddr) -> MMResult<()> {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let memset = &mut inner.tasks[current].memory_set;
+        let a = memset.translate(va.floor())?;
+        if a.readable() && a.writable() {
+            Ok(())
+        } else {
+            Err(PagePermissionError::NotWritable.into())
         }
     }
 }
@@ -299,24 +297,24 @@ pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
 }
 
-/// 获取当前任务状态
+/// Increment syscall count for the given id, by one
+pub fn inc_syscall_times(syscall_id: usize) {
+    TASK_MANAGER.inc_syscall_times(syscall_id);
+}
+
+/// Get task status of the current task
 pub fn get_task_status() -> TaskStatus {
     TASK_MANAGER.get_task_status()
 }
 
-/// 获取调度起始时间
-pub fn get_start_time() -> usize {
-    TASK_MANAGER.get_start_time()
+/// Get syscall times
+pub fn get_syscall_times(map: &mut [u32]) {
+    TASK_MANAGER.get_syscall_times(map)
 }
 
-/// 设置 syscall 次数
-pub fn set_syscall_times(syscalls: &mut [u32]) {
-    TASK_MANAGER.set_syscall_times(syscalls)
-}
-
-/// 针对 id 的系统调用计数器
-pub fn syscall_counter(syscall_id: usize) {
-    TASK_MANAGER.syscall_counter(syscall_id);
+/// Get dispatched time.
+pub fn get_dispatched_time() -> usize {
+    TASK_MANAGER.get_dispatched_time()
 }
 
 /// Map virtual page to physical page
@@ -329,15 +327,15 @@ pub fn munmap(start_va: VirtAddr, end_va: VirtAddr) -> isize {
     TASK_MANAGER.munmap(start_va, end_va)
 }
 
-/// 检查可读性
-pub fn check_readable(va: VirtAddr) -> MMResult<()> {
-    TASK_MANAGER.check_readable(va)
+/// Ensure the virtual page by allocating a frame for it
+pub fn ensure_page_exec(va: VirtAddr) -> MMResult<()> {
+    TASK_MANAGER.ensure_page_exec(va)
 }
-/// 检查可写性
-pub fn check_writeable(va: VirtAddr) -> MMResult<()> {
-    TASK_MANAGER.check_writeable(va)
+/// Ensure the virtual page by allocating a frame for it
+pub fn ensure_page_read(va: VirtAddr) -> MMResult<()> {
+    TASK_MANAGER.ensure_page_read(va)
 }
-/// 检查可执行性
-pub fn check_executable(va: VirtAddr) -> MMResult<()> {
-    TASK_MANAGER.check_executable(va)
+/// Ensure the virtual page by allocating a frame for it
+pub fn ensure_page_write(va: VirtAddr) -> MMResult<()> {
+    TASK_MANAGER.ensure_page_write(va)
 }

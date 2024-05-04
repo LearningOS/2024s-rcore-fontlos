@@ -77,7 +77,7 @@ pub struct PageTable {
 impl PageTable {
     /// Create a new page table
     pub fn new() -> MMResult<Self> {
-        let frame = frame_alloc().ok_or(MMError::MemoryNotEnough)?;
+        let frame = frame_alloc().ok_or(MMError::NotEnoughMemory)?;
         Ok(PageTable {
             root_ppn: frame.ppn,
             frames: vec![frame],
@@ -101,7 +101,7 @@ impl PageTable {
                 return Ok(pte);
             }
             if !pte.is_valid() {
-                let frame = frame_alloc().ok_or(MMError::MemoryNotEnough)?;
+                let frame = frame_alloc().ok_or(MMError::NotEnoughMemory)?;
                 *pte = PageTableEntry::new(frame.ppn, PTEFlags::V);
                 self.frames.push(frame);
             }
@@ -120,7 +120,7 @@ impl PageTable {
                 return Ok(pte);
             }
             if !pte.is_valid() {
-                return Err(PageError::DirPageInvalid.into());
+                return Err(PageError::InvalidDirPage.into());
             }
             ppn = pte.ppn();
         }
@@ -132,7 +132,7 @@ impl PageTable {
         let pte = self.find_pte_create(vpn)?;
         // assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn);
         if pte.is_valid() {
-            return Err(PageError::PageAlreadyAlloc.into());
+            return Err(PageError::PageAlreadyValid.into());
         }
         *pte = PageTableEntry::new(ppn, flags | PTEFlags::V);
         Ok(())

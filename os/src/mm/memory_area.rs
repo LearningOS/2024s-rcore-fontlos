@@ -73,7 +73,7 @@ impl MapArea {
     /// Do not call this function directly
     fn ensure_page_raw(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) -> MMResult<()> {
         if !self.data_frames.contains_key(&vpn) {
-            let frame = frame_alloc().ok_or(MMError::MemoryNotEnough)?;
+            let frame = frame_alloc().ok_or(MMError::NotEnoughMemory)?;
             let ppn = frame.ppn;
             self.data_frames.insert(vpn, frame);
             let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
@@ -129,7 +129,7 @@ impl MapArea {
         }
         match page_table.unmap(vpn) {
             Ok(_) => Ok(()),
-            Err(MMError::PageError(PageError::DirPageInvalid)) => Ok(()), // this error also indicates the frame is not prepared
+            Err(MMError::PageError(PageError::InvalidDirPage)) => Ok(()), // this error also indicates the frame is not prepared
             Err(MMError::PageError(PageError::PageInvalid)) => Ok(()),
             Err(e) => Err(e)
         }

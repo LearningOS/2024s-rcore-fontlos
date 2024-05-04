@@ -3,7 +3,7 @@ use core::mem::size_of;
 
 use crate::{
     config::MAX_SYSCALL_NUM, mm::{translated_byte_buffer, MapPermission, VirtAddr}, task::{
-        change_program_brk, current_user_token, exit_current_and_run_next, get_start_time, set_syscall_times, get_task_status, mmap, munmap, suspend_current_and_run_next, TaskStatus
+        change_program_brk, current_user_token, exit_current_and_run_next, get_dispatched_time, get_syscall_times, get_task_status, mmap, munmap, suspend_current_and_run_next, TaskStatus
     }
 };
 
@@ -84,9 +84,9 @@ pub fn sys_task_info(ti: *mut TaskInfo) -> isize {
         let mut buffer = alloc::vec![0u8; SIZE]; // size of TaskInfo is too large, so we choose to allocate on kernel heap
         unsafe {
             let ref_coe = (buffer.as_mut_ptr() as usize as *mut TaskInfo).as_mut().unwrap();
-            ref_coe.time = crate::timer::get_time_ms() - get_start_time();
+            ref_coe.time = crate::timer::get_time_ms() - get_dispatched_time();
             ref_coe.status = get_task_status();
-            set_syscall_times(&mut ref_coe.syscall_times);
+            get_syscall_times(&mut ref_coe.syscall_times);
         }
         copy_to_segs(regions, &buffer);
         0

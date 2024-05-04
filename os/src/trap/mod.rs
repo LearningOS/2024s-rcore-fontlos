@@ -17,7 +17,7 @@ mod context;
 use crate::config::{TRAMPOLINE, TRAP_CONTEXT_BASE};
 use crate::syscall::syscall;
 use crate::task::{
-    current_trap_cx, current_user_token, check_executable, check_readable, check_writeable, exit_current_and_run_next, suspend_current_and_run_next
+    current_trap_cx, current_user_token, ensure_page_exec, ensure_page_read, ensure_page_write, exit_current_and_run_next, suspend_current_and_run_next
 };
 use crate::timer::set_next_trigger;
 use core::arch::{asm, global_asm};
@@ -74,7 +74,7 @@ pub fn trap_handler() -> ! {
             exit_current_and_run_next();
         }
         Trap::Exception(Exception::LoadPageFault) => {
-            match check_readable(stval.into()) {
+            match ensure_page_read(stval.into()) {
                 Ok(_) => {
                     trace!("[kernel] Encountered PageFault, but successfully allocated backing frame, addr = {:#x}, instruction = {:#x}", stval, cx.sepc);
                 }
@@ -85,7 +85,7 @@ pub fn trap_handler() -> ! {
             }
         }
         Trap::Exception(Exception::StorePageFault) => {
-            match check_writeable(stval.into()) {
+            match ensure_page_write(stval.into()) {
                 Ok(_) => {
                     trace!("[kernel] Encountered PageFault, but successfully allocated backing frame, addr = {:#x}, instruction = {:#x}", stval, cx.sepc);
                 }
@@ -99,7 +99,7 @@ pub fn trap_handler() -> ! {
         Trap::Exception(Exception::InstructionPageFault) => {
             // println!("[kernel] !PageFault in application, bad addr = {:#x}, bad instruction = {:#x}, kernel killed it.", stval, cx.sepc);
             // exit_current_and_run_next();
-            match check_executable(stval.into()) {
+            match ensure_page_exec(stval.into()) {
                 Ok(_) => {
                     trace!("[kernel] Encountered PageFault, but successfully allocated backing frame, addr = {:#x}, instruction = {:#x}", stval, cx.sepc);
                 }
