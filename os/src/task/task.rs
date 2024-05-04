@@ -1,4 +1,8 @@
 //! Types related to task management
+
+// 有序键值对
+use alloc::collections::BTreeMap;
+
 use super::TaskContext;
 use crate::config::TRAP_CONTEXT_BASE;
 use crate::mm::{
@@ -13,6 +17,9 @@ pub struct TaskControlBlock {
 
     /// Maintain the execution status of the current process
     pub task_status: TaskStatus,
+
+    /// 任务信息块
+    pub task_info: TaskInfo,
 
     /// Application address space
     pub memory_set: MemorySet,
@@ -42,21 +49,25 @@ impl TaskControlBlock {
     /// Based on the elf info in program, build the contents of task in a new address space
     pub fn new(elf_data: &[u8], app_id: usize) -> Self {
         // memory_set with elf program headers/trampoline/trap context/user stack
-        let (memory_set, user_sp, entry_point) = MemorySet::from_elf(elf_data);
+        let segs = MemorySet::from_elf(elf_data);
+        assert!(segs.is_ok(), "failed to allocate memory for program, err={}", segs.err().unwrap());
+        let (mut memory_set, user_sp, entry_point) = segs.unwrap();
         let trap_cx_ppn = memory_set
-            .translate(VirtAddr::from(TRAP_CONTEXT_BASE).into())
+            .transform(VirtAddr::from(TRAP_CONTEXT_BASE).into())
             .unwrap()
             .ppn();
         let task_status = TaskStatus::Ready;
         // map a kernel-stack in kernel space
         let (kernel_stack_bottom, kernel_stack_top) = kernel_stack_position(app_id);
-        KERNEL_SPACE.exclusive_access().insert_framed_area(
+        let kernel_stack_alloc = KERNEL_SPACE.exclusive_access().insert_framed_area(
             kernel_stack_bottom.into(),
             kernel_stack_top.into(),
             MapPermission::R | MapPermission::W,
         );
+        assert!(kernel_stack_alloc.is_ok(), "failed to allocate memory for app, id = {}, err = {}", app_id, kernel_stack_alloc.err().unwrap());
         let task_control_block = Self {
             task_status,
+            task_info: TaskInfo::new(),
             task_cx: TaskContext::goto_trap_return(kernel_stack_top),
             memory_set,
             trap_cx_ppn,
@@ -89,11 +100,40 @@ impl TaskControlBlock {
             self.memory_set
                 .append_to(VirtAddr(self.heap_bottom), VirtAddr(new_brk as usize))
         };
-        if result {
+        if result.is_ok() {
             self.program_brk = new_brk as usize;
             Some(old_break)
         } else {
             None
+        }
+    }
+}
+
+/// 任务信息块
+#[derive(Clone)]
+pub struct TaskInfo {
+    /// 任务是否进行
+    pub is_dispatched: bool,
+    /// 调度时间
+    pub start_time: usize,
+    /// 调用次数
+    pub syscall_times: BTreeMap<usize, u32>
+}
+
+impl TaskInfo {
+    /// 初始化任务信息
+    pub fn new() -> Self {
+        TaskInfo {
+            is_dispatched: false,
+            start_time: 0,
+            syscall_times: BTreeMap::new()
+        }
+    }
+    /// 开始调度
+    pub fn dispatch(&mut self) {
+        if !self.is_dispatched {
+            self.start_time = crate::timer::get_time_ms();
+            self.is_dispatched = true;
         }
     }
 }

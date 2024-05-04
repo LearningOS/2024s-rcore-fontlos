@@ -204,7 +204,7 @@ impl StepByOne for VirtPageNum {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, PartialEq)]
 /// a simple range structure for type T
 pub struct SimpleRange<T>
 where
@@ -218,14 +218,77 @@ where
     T: StepByOne + Copy + PartialEq + PartialOrd + Debug,
 {
     pub fn new(start: T, end: T) -> Self {
-        assert!(start <= end, "start {:?} > end {:?}!", start, end);
+        assert!(start <= end, "Start cannot be greater than end! start: {:?}, end: {:?}", start, end);
         Self { l: start, r: end }
     }
+
+    pub fn new_by_len(start: T, len: usize) -> Self {
+        let mut end = start;
+        for _ in 0..len {
+            end.step();
+        }
+        Self::new(start, end)
+    }
+
     pub fn get_start(&self) -> T {
         self.l
     }
     pub fn get_end(&self) -> T {
         self.r
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.l >= self.r
+    }
+    pub fn is_contains(&self, v: &T) -> bool {
+        self.l <= *v && *v < self.r
+    }
+    pub fn intersection(&self, other: &Self) -> Self {
+        let maxl = if other.l < self.l {
+            self.l
+        } else {
+            other.l
+        };
+        let minr = if other.r < self.r {
+            other.r
+        } else {
+            self.r
+        };
+        let r = if minr < maxl {
+            maxl
+        } else {
+            minr
+        };
+        Self {l:maxl, r}
+    }
+    pub fn intersects(&self, other: &Self) -> bool {
+        !self.intersection(&other).is_empty()
+    }
+    fn exclude_left(&self, other: &Self) -> Self {
+        let r = if other.l < self.l {
+            self.l
+        } else if other.l <= self.r {
+            other.l
+        } else {
+            self.r
+        };
+        Self {l:self.l, r}
+    }
+    fn exclude_right(&self, other: &Self) -> Self {
+        let t = if other.r > self.r {
+            self.r
+        } else if other.r >= self.l {
+            other.r
+        } else {
+            self.l
+        };
+        Self {l:t, r:self.r}
+    }
+    pub fn exclude(&self, other: &Self) -> (Self, Self, Self) {
+        let l = self.exclude_left(other);
+        let r = self.exclude_right(other);
+        let s = Self {l:l.r, r: r.l};
+        (l, r, s)
     }
 }
 impl<T> IntoIterator for SimpleRange<T>
@@ -260,7 +323,7 @@ where
 {
     type Item = T;
     fn next(&mut self) -> Option<Self::Item> {
-        if self.current == self.end {
+        if self.current >= self.end { // 防爆
             None
         } else {
             let t = self.current;
