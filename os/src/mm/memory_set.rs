@@ -59,7 +59,7 @@ impl MemorySet {
         end_va: VirtAddr,
         permission: MapPermission,
     ) -> MemoryResult<()> {
-        self.push(
+        self.push_strict(
             MapArea::new(start_va, end_va, MapType::Framed, permission),
             None,
         )
@@ -76,9 +76,9 @@ impl MemorySet {
             None,
         )
     }
-    fn push(&mut self, mut map_area: MapArea, data: Option<&[u8]>) -> MemoryResult<()> {
+    fn push_strict(&mut self, mut map_area: MapArea, data: Option<&[u8]>) -> MemoryResult<()> {
         map_area.map(&mut self.page_table)?;
-        map_area.check_all_page(&mut self.page_table)?; // force allocation
+        map_area.ensure_all(&mut self.page_table)?; // force allocation
         if let Some(data) = data {
             map_area.copy_data(&mut self.page_table, data)?;
         }
@@ -93,7 +93,6 @@ impl MemorySet {
         self.areas.push(map_area);
         Ok(())
     }
-    /// Mention that trampoline is not collected by areas.
     fn map_trampoline(&mut self) -> MemoryResult<()> {
         self.page_table.map(
             VirtAddr::from(TRAMPOLINE).into(),
@@ -198,8 +197,8 @@ impl MemorySet {
                     map_perm |= MapPermission::X;
                 }
                 let map_area = MapArea::new(start_va, end_va, MapType::Framed, map_perm);
-                max_end_vpn = map_area.get_vpn_range().get_end();
-                memory_set.push(
+                max_end_vpn = map_area.get_range().get_end();
+                memory_set.push_strict(
                     map_area,
                     Some(&elf.input[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize]),
                 )?;
@@ -220,7 +219,6 @@ impl MemorySet {
             ),
             None,
         )?;
-        // used in sbrk
         memory_set.push_lazy(
             MapArea::new(
                 user_stack_top.into(),
@@ -230,9 +228,7 @@ impl MemorySet {
             ),
             None,
         )?;
-        // map TrapContext
-        // 必须严格分配内存以便 trap_handler 工作
-        memory_set.push(
+        memory_set.push_strict(
             MapArea::new(
                 TRAP_CONTEXT_BASE.into(),
                 TRAMPOLINE.into(),
@@ -255,13 +251,18 @@ impl MemorySet {
             asm!("sfence.vma");
         }
     }
-    /// 将虚拟页号映射到页表
-    pub fn transform(&mut self, vpn: VirtPageNum) -> MemoryResult<PageTableEntry> {
-        if let Some(area) = self.areas.iter_mut().find(|x|x.get_vpn_range().is_contains(&vpn)) {
-            area.check_range(&mut self.page_table, VPNRange::new_by_len(vpn, 1))?;
+    #[allow(unused)]
+    fn find_area_ensure(&mut self, vpn: VirtPageNum) -> MemoryResult<()> {
+        if let Some(area) = self.areas.iter_mut().find(|x|x.get_range().contains(&vpn)) {
+            area.ensure_range(&mut self.page_table, VPNRange::by_len(vpn, 1))
         } else {
-            return Err(AreaError::NotInclude.into())
-        };
+            Err(AreaError::AreaRangeNotInclude.into())
+        }
+    }
+    /// Translate a virtual page number to a page table entry.<br/>
+    /// Calling this function will forcibly allocate a frame for the requested page.
+    pub fn translate(&mut self, vpn: VirtPageNum) -> MemoryResult<PageTableEntry> {
+        self.find_area_ensure(vpn)?;
         self.page_table.translate(vpn)
     }
     /// shrink the area to new_end
@@ -270,11 +271,11 @@ impl MemorySet {
         if let Some(area) = self
             .areas
             .iter_mut()
-            .find(|area| area.get_vpn_range().get_start() == start.floor())
+            .find(|area| area.get_range().get_start() == start.floor())
         {
-            area.narrow(&mut self.page_table, new_end.ceil())
+            area.shrink_to(&mut self.page_table, new_end.ceil())
         } else {
-            Err(AreaError::NotMatch.into())
+            Err(AreaError::NoMatchingArea.into())
         }
     }
 
@@ -284,24 +285,27 @@ impl MemorySet {
         if let Some(area) = self
             .areas
             .iter_mut()
-            .find(|area| area.get_vpn_range().get_start() == start.floor())
+            .find(|area| area.get_range().get_start() == start.floor())
         {
-            area.expand(&mut self.page_table, new_end.ceil())
+            area.append_to(&mut self.page_table, new_end.ceil())
         } else {
-            Err(AreaError::NotMatch.into())
+            Err(AreaError::NoMatchingArea.into())
         }
     }
 
-    fn is_mapped(&self, range: VPNRange) -> bool {
-        self.areas.iter().any(|x|x.get_vpn_range().intersects(&range))
+    /// test if there are mapped area whitin the given range.<br/>
+    /// note that this doesn't check mappings which are not tracked by `MapArea`s
+    fn has_mapped(&self, range: VPNRange) -> bool {
+        self.areas.iter().any(|x|x.get_range().intersects(&range))
     }
 
-    fn is_unmapped(&self, range: VPNRange) -> bool {
+    /// test if there are unmapped area whitin the given range.<br/>
+    /// note that this doesn't check mappings which are not tracked by `MapArea`s
+    fn has_unmapped(&self, range: VPNRange) -> bool {
         let count = self.areas.iter().map(|x|{
-            let (_, _, rem) = x.get_vpn_range().exclude(&range);
+            let (_, _, rem) = x.get_range().exclude(&range);
             rem.into_iter().count()
         }).sum::<usize>();
-
         let expected = range.into_iter().count();
         count != expected
     }
@@ -323,11 +327,11 @@ impl MemorySet {
         permission: MapPermission,
     ) -> MemoryResult<()>  {
         let area = MapArea::new(start_va, end_va, MapType::Framed, permission);
-        if area.get_vpn_range().into_iter().any(|x|self.is_critical(x)) {
-            return Err(AreaError::CriticalArea.into());
+        if area.get_range().into_iter().any(|x|self.is_critical(x)) {
+            return Err(AreaError::AreaCritical.into());
         }
-        if self.is_mapped(area.get_vpn_range()) {
-            return Err(AreaError::ContainMapped.into());
+        if self.has_mapped(area.get_range()) {
+            return Err(AreaError::AreaHasMappedPortion.into());
         }
         self.push_lazy(
             area,
@@ -343,24 +347,24 @@ impl MemorySet {
     ) -> MemoryResult<()>  {
         let target_range = VPNRange::new(start_va.floor(), end_va.ceil());
         if target_range.into_iter().any(|x|self.is_critical(x)) {
-            return Err(AreaError::CriticalArea.into());
+            return Err(AreaError::AreaCritical.into());
         }
-        if self.is_unmapped(target_range) {
-            return Err(AreaError::ContainUnmapped.into());
+        if self.has_unmapped(target_range) {
+            return Err(AreaError::AreaHasUnmappedPortion.into());
         }
         let areas = core::mem::take(&mut self.areas);
         for area in areas.into_iter() {
-            let (l, _, rem) = area.get_vpn_range().exclude(&target_range);
+            let (l, _, rem) = area.get_range().exclude(&target_range);
             if rem.is_empty() {
                 self.areas.push(area);
                 continue;
             }
             let (larea, rarea) = area.split(l.get_end());
             let (mut marea, rarea) = rarea.split(rem.get_end());
-            if !larea.get_vpn_range().is_empty() {
+            if !larea.get_range().is_empty() {
                 self.areas.push(larea);
             }
-            if !rarea.get_vpn_range().is_empty() {
+            if !rarea.get_range().is_empty() {
                 self.areas.push(rarea);
             }
             marea.unmap(&mut self.page_table)?;

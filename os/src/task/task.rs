@@ -53,7 +53,7 @@ impl TaskControlBlock {
         assert!(segs.is_ok(), "failed to allocate memory for program, err={}", segs.err().unwrap());
         let (mut memory_set, user_sp, entry_point) = segs.unwrap();
         let trap_cx_ppn = memory_set
-            .transform(VirtAddr::from(TRAP_CONTEXT_BASE).into())
+            .translate(VirtAddr::from(TRAP_CONTEXT_BASE).into())
             .unwrap()
             .ppn();
         let task_status = TaskStatus::Ready;

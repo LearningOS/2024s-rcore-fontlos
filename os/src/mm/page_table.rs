@@ -90,11 +90,12 @@ impl PageTable {
             frames: Vec::new(),
         }
     }
-
+    /// Find PageTableEntry by VirtPageNum, create a frame for a 4KB page table if not exist<br/>
+    /// Only fails when there's no frame allocated for page table node, and `NotEnoughMemory` is returned.
     fn find_pte_create(&mut self, vpn: VirtPageNum) -> MemoryResult<&mut PageTableEntry> {
-        let indexs = vpn.indexes();
+        let idxs = vpn.indexes();
         let mut ppn = self.root_ppn;
-        for (i, idx) in indexs.iter().enumerate() {
+        for (i, idx) in idxs.iter().enumerate() {
             let pte = &mut ppn.get_pte_array()[*idx];
             if i == 2 {
                 return Ok(pte);
@@ -108,7 +109,8 @@ impl PageTable {
         }
         unreachable!("impossible");
     }
-
+    /// Find PageTableEntry by VirtPageNum<br/>
+    /// Only fails when no corresponding page table tree path exists, and `InvalidDirPage` is returned.
     fn find_pte(&self, vpn: VirtPageNum) -> MemoryResult<&mut PageTableEntry> {
         let idxs = vpn.indexes();
         let mut ppn = self.root_ppn;

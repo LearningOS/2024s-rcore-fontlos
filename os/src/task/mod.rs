@@ -220,7 +220,7 @@ impl TaskManager {
         let mut inner = self.inner.exclusive_access();
         let current = inner.current_task;
         let memset = &mut inner.tasks[current].memory_set;
-        let a = memset.transform(va.floor())?;
+        let a = memset.translate(va.floor())?;
         if a.readable() {
             Ok(())
         } else {
@@ -232,7 +232,7 @@ impl TaskManager {
         let mut inner = self.inner.exclusive_access();
         let current = inner.current_task;
         let memset = &mut inner.tasks[current].memory_set;
-        let a = memset.transform(va.floor())?;
+        let a = memset.translate(va.floor())?;
         if a.readable() && a.writable() {
             Ok(())
         } else {
@@ -245,7 +245,7 @@ impl TaskManager {
         let mut inner = self.inner.exclusive_access();
         let current = inner.current_task;
         let memset = &mut inner.tasks[current].memory_set;
-        let a = memset.transform(va.floor())?;
+        let a = memset.translate(va.floor())?;
         if a.readable() && a.executable() {
             Ok(())
         } else {

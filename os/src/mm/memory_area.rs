@@ -5,109 +5,114 @@ use super::{frame_alloc, FrameTracker, MemoryError, MemoryResult, PageError, Phy
 use super::address::VPNRange;
 use super::page_table::{PTEFlags, PageTable};
 
-/// 连续虚拟内存映射
+/// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {
     vpn_range: VPNRange,
-    data_frame: BTreeMap<VirtPageNum, FrameTracker>,
+    data_frames: BTreeMap<VirtPageNum, FrameTracker>,
     map_type: MapType,
-    map_permission: MapPermission,
+    map_perm: MapPermission,
 }
 
 impl MapArea {
-    /// 或许虚拟页码范围
-    pub fn get_vpn_range(&self) -> VPNRange {
+    /// get vpn range
+    pub fn get_range(&self) -> VPNRange {
         self.vpn_range
     }
 
-    /// 分割内存映射
+    /// split the given area into two, with the same type and permission.<br/>
+    /// `(self[start..vpn), self[vpn..end))` is returned
     pub fn split(self, vpn: VirtPageNum) -> (Self, Self) {
-        let mut other = Self {vpn_range: VPNRange::new(vpn, vpn), data_frame: BTreeMap::new(), map_type: self.map_type, map_permission: self.map_permission};
+        let mut other = Self {vpn_range: VPNRange::new(vpn, vpn), data_frames: BTreeMap::new(), map_type: self.map_type, map_perm: self.map_perm};
         if vpn <= self.vpn_range.get_start() {
             return (other, self);
         } else if vpn >= self.vpn_range.get_end() {
             return (self, other);
         } else {
-            let mut left = BTreeMap::new();
-            let mut right = BTreeMap::new();
-            for (i, frame) in self.data_frame.into_iter() {
+            let mut mapl = BTreeMap::new();
+            let mut mapr = BTreeMap::new();
+            // now collect `FrameTracker`s into different maps, according to their vpn
+            for (i, frame) in self.data_frames.into_iter() { // self.data_frames moved here
                 if i < vpn {
-                    left.insert(i, frame);
+                    mapl.insert(i, frame);
                 } else {
-                    right.insert(i, frame);
+                    mapr.insert(i, frame);
                 }
             }
             let left = Self {
                 vpn_range: VPNRange::new(self.vpn_range.get_start(), vpn),
-                data_frame: left,
+                data_frames: mapl,
                 map_type: self.map_type,
-                map_permission: self.map_permission
+                map_perm: self.map_perm
             };
             other = Self {
                 vpn_range: VPNRange::new(vpn, self.vpn_range.get_end()),
-                data_frame: right,
+                data_frames: mapr,
                 map_type: self.map_type,
-                map_permission: self.map_permission
+                map_perm: self.map_perm
             };
             return (left, other);
         }
     }
-    /// 新建映射区域
+    /// create new map area
     pub fn new(
-        start_virt_addr: VirtAddr,
-        end_virt_addr: VirtAddr,
+        start_va: VirtAddr,
+        end_va: VirtAddr,
         map_type: MapType,
         map_perm: MapPermission,
     ) -> Self {
-        let start_vpn: VirtPageNum = start_virt_addr.floor();
-        let end_vpn: VirtPageNum = end_virt_addr.ceil();
+        let start_vpn: VirtPageNum = start_va.floor();
+        let end_vpn: VirtPageNum = end_va.ceil();
         Self {
             vpn_range: VPNRange::new(start_vpn, end_vpn),
-            data_frame: BTreeMap::new(),
+            data_frames: BTreeMap::new(),
             map_type,
-            map_permission: map_perm,
+            map_perm,
         }
     }
 
-    /// 检查页的原始函数
-    fn check_page_raw(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) -> MemoryResult<()> {
-        if !self.data_frame.contains_key(&vpn) {
+    /// Do not call this function directly
+    fn ensure_page_raw(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) -> MemoryResult<()> {
+        if !self.data_frames.contains_key(&vpn) {
             let frame = frame_alloc().ok_or(MemoryError::MemoryNotEnough)?;
             let ppn = frame.ppn;
-            self.data_frame.insert(vpn, frame);
-            let pte_flags = PTEFlags::from_bits(self.map_permission.bits).unwrap();
-            match page_table.map(vpn, ppn, pte_flags) {
+            self.data_frames.insert(vpn, frame);
+            let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
+            match page_table.map(vpn, ppn, pte_flags) { // CRITICAL: drop the frame if mapping fails
                 Ok(_) => return Ok(()),
                 Err(e) => {
-                    self.data_frame.remove(&vpn);
+                    self.data_frames.remove(&vpn); // will be dropped
                     return Err(e);
                 },
             }
         }
         Ok(())
     }
-    /// 检查范围
-    pub fn check_range(&mut self, page_table: &mut PageTable, vpn_range: VPNRange) -> MemoryResult<()> {
+    /// ensure the intersection of the specified range
+    #[allow(unused)]
+    pub fn ensure_range(&mut self, page_table: &mut PageTable, vpn_range: VPNRange) -> MemoryResult<()> {
         match self.map_type {
             MapType::Identical => Ok(()),
             MapType::Framed => {
-                self.vpn_range.intersection(&vpn_range);
+                let r = self.vpn_range.intersection(&vpn_range);
                 for vpn in self.vpn_range.intersection(&vpn_range) {
-                    self.check_page_raw(page_table, vpn)?;
+                    self.ensure_page_raw(page_table, vpn)?;
                 }
                 Ok(())
             },
         }
     }
-    /// 检查所有要映射的页
-    pub fn check_all_page(&mut self, page_table: &mut PageTable) -> MemoryResult<()> {
-        self.check_range(page_table, self.vpn_range)
+    /// ensure all virtual pages to be mapped
+    pub fn ensure_all(&mut self, page_table: &mut PageTable) -> MemoryResult<()> {
+        self.ensure_range(page_table, self.vpn_range)
     }
 
+    /// For identity mappings, this function will map them all in page table.<br/>
+    /// While for framed mappings, this function only emit an area but without actually allocating frames.
     fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) -> MemoryResult<()> {
         match self.map_type {
             MapType::Identical => {
                 let ppn = PhysPageNum(vpn.0);
-                let pte_flags = PTEFlags::from_bits(self.map_permission.bits).unwrap();
+                let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
                 page_table.map(vpn, ppn, pte_flags)
             }
             MapType::Framed => {
@@ -116,9 +121,11 @@ impl MapArea {
         }
     }
 
+    /// unmap one virtual page, won't return error if the virtual page is not mapped
+    #[allow(unused)]
     fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) -> MemoryResult<()> {
         if self.map_type == MapType::Framed {
-            self.data_frame.remove(&vpn); // 释放映射的帧
+            self.data_frames.remove(&vpn); // if there is mapped frame, then it's dropped
         }
         match page_table.unmap(vpn) {
             Ok(_) => Ok(()),
@@ -127,7 +134,7 @@ impl MapArea {
             Err(e) => Err(e)
         }
     }
-    /// 非严格的完全映射
+    /// Map the whole area, but without allocating frames stricly.
     pub fn map(&mut self, page_table: &mut PageTable) -> MemoryResult<()> {
         for vpn in self.vpn_range {
             match self.map_one(page_table, vpn) {
@@ -138,7 +145,7 @@ impl MapArea {
         Ok(())
     }
 
-    /// 取消所有映射
+    /// unmap the whole area
     pub fn unmap(&mut self, page_table: &mut PageTable) -> MemoryResult<()> {
         for vpn in self.vpn_range {
             match self.unmap_one(page_table, vpn) {
@@ -151,37 +158,39 @@ impl MapArea {
         Ok(())
     }
 
-    /// 收缩内存区域
+    /// shrink the area to a new end
     #[allow(unused)]
-    pub fn narrow(&mut self, page_table: &mut PageTable, to: VirtPageNum) -> MemoryResult<()> {
-        for vpn in VPNRange::new(to, self.vpn_range.get_end()) {
+    pub fn shrink_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) -> MemoryResult<()> {
+        for vpn in VPNRange::new(new_end, self.vpn_range.get_end()) {
             match self.unmap_one(page_table, vpn) {
                 Ok(_) => {},
                 Err(e) => return Err(e)
             }
         }
-        self.vpn_range = VPNRange::new(self.vpn_range.get_start(), to);
+        self.vpn_range = VPNRange::new(self.vpn_range.get_start(), new_end);
         Ok(())
     }
 
-    /// 扩张内存区域
+    /// expand the area to a new end
     #[allow(unused)]
-    pub fn expand(&mut self, page_table: &mut PageTable, to: VirtPageNum) -> MemoryResult<()> {
-        for vpn in VPNRange::new(self.vpn_range.get_end(), to) {
+    pub fn append_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) -> MemoryResult<()> {
+        for vpn in VPNRange::new(self.vpn_range.get_end(), new_end) {
             match self.map_one(page_table, vpn) {
                 Ok(_) => {},
                 Err(e) => return Err(e)
             }
         }
-        self.vpn_range = VPNRange::new(self.vpn_range.get_start(), to);
+        self.vpn_range = VPNRange::new(self.vpn_range.get_start(), new_end);
         Ok(())
     }
-    /// 复制数据并确保所需要的帧
+    /// data: start-aligned but maybe with shorter length.<br/>
+    /// assume that all frames were cleared before.<br/>
+    /// This function will ensure that required frames are allocated before actually copying data.
     pub fn copy_data(&mut self, page_table: &mut PageTable, data: &[u8]) -> MemoryResult<()> {
         assert_eq!(self.map_type, MapType::Framed);
         let pages = (data.len() - 1 + PAGE_SIZE) / PAGE_SIZE;
-        assert!(pages <= self.vpn_range.into_iter().count());
-        self.check_range(page_table, VPNRange::new_by_len(self.vpn_range.get_start(), pages))?;
+        assert!(pages <= self.vpn_range.into_iter().count()); // data's length cannot exceed the area size
+        self.ensure_range(page_table, VPNRange::by_len(self.vpn_range.get_start(), pages))?;
         let mut start: usize = 0;
         let mut current_vpn = self.vpn_range.get_start();
         let len = data.len();
@@ -202,25 +211,25 @@ impl MapArea {
     }
 }
 
-/// 内存映射类型
 #[derive(Copy, Clone, PartialEq, Debug)]
+/// map type for memory set: identical or framed
 pub enum MapType {
-    /// 特定映射
+    /// identity mappings
     Identical,
-    /// 帧映射
+    /// framed mappings
     Framed,
 }
 
 bitflags! {
-    /// 将权限映射到 R W X U
+    /// map permission corresponding to that in pte: `R W X U`
     pub struct MapPermission: u8 {
-        /// 可读
+        ///Readable
         const R = 1 << 1;
-        /// 可写
+        ///Writable
         const W = 1 << 2;
-        /// 可执行
+        ///Excutable
         const X = 1 << 3;
-        /// 用户可操作
+        ///Accessible in U mode
         const U = 1 << 4;
     }
 }

@@ -28,19 +28,21 @@ pub enum PageError {
     PermissionError(PagePermissionError)
 }
 
-/// 内存区域分配错误
+/// Errors related to area management
 #[derive(Debug)]
 pub enum AreaError {
-    /// 内存区域不匹配
-    NotMatch,
-    /// 内存区域超出范围
-    NotInclude,
-    /// 包含以映射区域
-    ContainMapped,
-    /// 包含未映射部分
-    ContainUnmapped,
-    /// 无法回收关键映射区域
-    CriticalArea,
+    /// no requested area
+    NoMatchingArea,
+    /// requested area contains mapped portion,
+    /// often returned from some mapping procsess.
+    AreaHasMappedPortion,
+    /// requested area contains unmapped portion,
+    /// often returned from some unmapping process.
+    AreaHasUnmappedPortion,
+    /// when trying to unmap a critical area, e.g. `TRAMPOLINE`
+    AreaCritical,
+    /// when requested vpn is not inside the area
+    AreaRangeNotInclude,
 }
 
 /// 内存错误
@@ -92,11 +94,11 @@ impl Display for PageError {
 impl Display for AreaError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            AreaError::NotMatch => f.write_str("NotMatch"),
-            AreaError::NotInclude => f.write_str("NotInclude"),
-            AreaError::ContainMapped => f.write_str("ContainMapped"),
-            AreaError::ContainUnmapped => f.write_str("ContainUnmapped"),
-            AreaError::CriticalArea => f.write_str("CriticalArea"),
+            AreaError::NoMatchingArea => f.write_str("NoMatchingArea"),
+            AreaError::AreaHasMappedPortion => f.write_str("AreaHasMappedPortion"),
+            AreaError::AreaHasUnmappedPortion => f.write_str("AreaHasUnmappedPortion"),
+            AreaError::AreaCritical => f.write_str("AreaCritical"),
+            AreaError::AreaRangeNotInclude => f.write_str("AreaRangeNotInclude"),
         }
     }
 }
