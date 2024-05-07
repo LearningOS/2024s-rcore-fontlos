@@ -2,8 +2,9 @@
 use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
 use crate::config::TRAP_CONTEXT_BASE;
-use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
+use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE, MapPermission};
 use crate::sync::UPSafeCell;
+use crate::syscall::TaskInfo;
 use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -68,6 +69,10 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+    pub task_info: TaskInfo,
+    pub start_time: usize,
+    pub priority: isize,
+    pub stride: isize,
 }
 
 impl TaskControlBlockInner {
@@ -84,6 +89,21 @@ impl TaskControlBlockInner {
     }
     pub fn is_zombie(&self) -> bool {
         self.get_status() == TaskStatus::Zombie
+    }
+    pub fn mmap(&mut self, start: usize, len: usize, port: usize) -> isize {
+        if start % 4096 == 0 && (port & !0x7 == 0) && (port & 0x7 != 0) {
+            self.memory_set.insert_framed_area(VirtAddr::from(start), VirtAddr::from(start + len), MapPermission::from_usize((port << 1) | 0x18))
+        } else {
+            -1
+        }
+    }
+
+    pub fn munmap(&mut self, start: usize, len: usize) -> isize {
+        if start % 4096 == 0 && len % 4096 == 0 {
+            self.memory_set.remove_area(VirtAddr::from(start), VirtAddr::from(start + len))
+        } else {
+            -1
+        }
     }
 }
 
@@ -118,6 +138,10 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    task_info: TaskInfo::new(TaskStatus::Ready),
+                    start_time: 0,
+                    priority: 16,
+                    stride: 0,
                 })
             },
         };
@@ -191,6 +215,10 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    task_info: TaskInfo::new(TaskStatus::Ready),
+                    start_time: 0,
+                    priority: 16,
+                    stride: 0,
                 })
             },
         });
