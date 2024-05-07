@@ -129,9 +129,8 @@ impl PageTable {
     #[allow(unused)]
     pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) -> isize{
         let pte = self.find_pte_create(vpn).unwrap();
-        // assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn);
         if pte.is_valid() {
-            println!("vpn is mapped before mapping");
+            println!("vpn {:?} is mapped before mapping", vpn);
             return -1
         }
         *pte = PageTableEntry::new(ppn, flags | PTEFlags::V);
@@ -141,9 +140,8 @@ impl PageTable {
     #[allow(unused)]
     pub fn unmap(&mut self, vpn: VirtPageNum) -> isize {
         let pte = self.find_pte(vpn).unwrap();
-        // assert!(pte.is_valid(), "vpn {:?} is invalid before unmapping", vpn);
         if !pte.is_valid() {
-            println!("vpn is invalid before unmapping");
+            println!("vpn {:?} is invalid before unmapping", vpn);
             return -1
         }
         *pte = PageTableEntry::empty();

@@ -450,7 +450,7 @@ impl MapArea {
     pub fn contains_range(&self, start_va: VirtAddr, end_va: VirtAddr) -> bool {
         let start_vpn = VirtPageNum::from(start_va);
         let end_vpn = VirtPageNum::from(end_va);
-        self.vpn_range.contains(start_vpn) && self.vpn_range.contains(end_vpn)
+        self.vpn_range.is_contain(start_vpn) && self.vpn_range.is_contain(end_vpn)
     }
 }
 
