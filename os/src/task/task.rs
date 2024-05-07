@@ -1,14 +1,14 @@
 //! Types related to task management & Functions for completely changing TCB
 use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
-use crate::config::TRAP_CONTEXT_BASE;
+use crate::config::{TRAP_CONTEXT_BASE, MAX_SYSCALL_NUM};
 use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE, MapPermission};
 use crate::sync::UPSafeCell;
-use crate::syscall::TaskInfo;
 use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::cell::RefMut;
+use crate::timer::get_time_ms;
 
 /// Task control block structure
 ///
@@ -75,6 +75,17 @@ pub struct TaskControlBlockInner {
     pub stride: isize,
 }
 
+/// Task information
+#[allow(dead_code)]
+#[derive(Copy, Clone)]
+pub struct TaskInfo {
+    /// Task status in it's life cycle
+    status: TaskStatus,
+    /// The numbers of syscall called by task
+    syscall_times: [u32; MAX_SYSCALL_NUM],
+    /// Total running time of task
+    time: usize,
+}
 impl TaskControlBlockInner {
     /// get the trap context
     pub fn get_trap_cx(&self) -> &'static mut TrapContext {
@@ -216,7 +227,7 @@ impl TaskControlBlock {
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
                     task_info: TaskInfo::new(TaskStatus::Ready),
-                    start_time: 0,
+                    start_time: get_time_ms(),
                     priority: 16,
                     stride: 0,
                 })
@@ -263,6 +274,34 @@ impl TaskControlBlock {
         } else {
             None
         }
+    }
+
+}
+
+impl TaskInfo {
+    pub fn new(status: TaskStatus) -> Self {
+        // Initialize syscall_times with zeros.
+        let syscall_times = [0; MAX_SYSCALL_NUM];
+        // Assuming TaskStatus::Running is a reasonable default.
+        TaskInfo {
+            status,
+            syscall_times,
+            time: 0,
+        }
+    }
+
+    pub fn set_status(&mut self, status: TaskStatus) {
+        self.status = status;
+    }
+
+    pub fn syscall_counter(&mut self, index: usize) {
+        if index < MAX_SYSCALL_NUM {
+            self.syscall_times[index] += 1;
+        }
+    }
+
+    pub fn set_dispatch_time(&mut self, increment: usize) {
+        self.time = increment;
     }
 }
 

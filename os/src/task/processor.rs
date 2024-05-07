@@ -4,13 +4,12 @@
 //! the current running state of CPU is recorded,
 //! and the replacement and transfer of control flow of different applications are executed.
 
-use super::__switch;
+use super::{__switch, TaskInfo};
 use super::{fetch_task, TaskStatus};
 use super::{TaskContext, TaskControlBlock};
 use crate::sync::UPSafeCell;
-use crate::syscall::TaskInfo;
-use crate::timer::get_time_ms;
 use crate::trap::TrapContext;
+use crate::timer::get_time_ms;
 use alloc::sync::Arc;
 use lazy_static::*;
 
@@ -62,7 +61,7 @@ impl Processor {
         let binding = self.current().unwrap();
         let mut task = binding.inner_exclusive_access();
         let start_time = task.start_time;
-        let dispatch_time = get_time_ms();
+        let dispatch_time = get_time_ms()-start_time;
         println!("[Kernel][Task] get_time_ms = {}", get_time_ms());
         println!("[Kernel][Task] start_time = {}", start_time);
         println!("[Kernel][Task] dispatch_time = {}", dispatch_time);

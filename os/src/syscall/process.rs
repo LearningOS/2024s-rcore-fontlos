@@ -2,14 +2,13 @@
 use alloc::sync::Arc;
 
 use crate::{
-    config::MAX_SYSCALL_NUM,
     loader::get_app_data_by_name,
     mm::{translated_refmut, translated_str, translated_byte_buffer},
     task::{
         add_task, current_task, current_user_token, exit_current_and_run_next,
         suspend_current_and_run_next, get_current_processor_info,
         get_current_processor_mmap, get_current_processor_munmap,
-        TaskStatus,
+        TaskInfo,
     },
     timer::get_time_us,
 };
@@ -24,43 +23,6 @@ pub struct TimeVal {
     pub usec: usize,
 }
 
-/// Task information
-#[allow(dead_code)]
-#[derive(Copy, Clone)]
-pub struct TaskInfo {
-    /// Task status in it's life cycle
-    status: TaskStatus,
-    /// The numbers of syscall called by task
-    syscall_times: [u32; MAX_SYSCALL_NUM],
-    /// Total running time of task
-    time: usize,
-}
-
-impl TaskInfo {
-    /// new
-    pub fn new(status: TaskStatus) -> Self {
-        let syscall_times = [0; MAX_SYSCALL_NUM];
-        TaskInfo {
-            status,
-            syscall_times,
-            time: 0,
-        }
-    }
-    /// set_status
-    pub fn set_status(&mut self, status: TaskStatus) {
-        self.status = status;
-    }
-    /// syscall_counter
-    pub fn syscall_counter(&mut self, syscall: usize) {
-        if syscall < MAX_SYSCALL_NUM {
-            self.syscall_times[syscall] += 1;
-        }
-    }
-    /// increment_time
-    pub fn set_dispatch_time(&mut self, time: usize) {
-        self.time = time;
-    }
-}
 
 /// task exits and submit an exit code
 pub fn sys_exit(exit_code: i32) -> ! {
@@ -254,7 +216,7 @@ pub fn sys_set_priority(prio: isize) -> isize {
     let mut task = current_task.inner_exclusive_access();
     if prio >= 2 {
         task.priority = prio;
-        0
+        prio
     } else {
         -1
     }

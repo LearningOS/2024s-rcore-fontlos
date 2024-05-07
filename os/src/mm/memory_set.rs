@@ -351,7 +351,7 @@ impl MapArea {
             map_perm: another.map_perm,
         }
     }
-    pub fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) -> isize {
+    pub fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) -> isize{
         let ppn: PhysPageNum;
         match self.map_type {
             MapType::Identical => {
@@ -366,6 +366,7 @@ impl MapArea {
         let pte_flags = PTEFlags::from_bits(self.map_perm.bits).unwrap();
         page_table.map(vpn, ppn, pte_flags)
     }
+    #[allow(unused)]
     pub fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) -> isize {
         if self.map_type == MapType::Framed {
             self.data_frames.remove(&vpn);
@@ -374,7 +375,7 @@ impl MapArea {
     }
     pub fn map(&mut self, page_table: &mut PageTable) -> isize {
         for vpn in self.vpn_range {
-            if self.map_one(page_table, vpn) != 0{
+            if self.map_one(page_table, vpn) != 0 {
                 return -1;
             }
         }
@@ -382,7 +383,7 @@ impl MapArea {
     }
     pub fn unmap(&mut self, page_table: &mut PageTable) -> isize {
         for vpn in self.vpn_range {
-            if self.unmap_one(page_table, vpn) != 0{
+            if self.unmap_one(page_table, vpn) != 0 {
                 return -1;
             }
         }
