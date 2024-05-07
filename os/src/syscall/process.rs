@@ -2,65 +2,24 @@
 use alloc::sync::Arc;
 
 use crate::{
-    config::MAX_SYSCALL_NUM,
     loader::get_app_data_by_name,
     mm::{translated_refmut, translated_str, translated_byte_buffer},
     task::{
         add_task, current_task, current_user_token, exit_current_and_run_next,
-        suspend_current_and_run_next, get_current_processor_info,
-        get_current_processor_mmap, get_current_processor_munmap,
-        TaskStatus,
+        suspend_current_and_run_next, TaskInfo,
+        get_current_processor_info,
     },
     timer::get_time_us,
 };
+use crate::task::{current_processor_m_map, current_processor_m_unmap};
 
-/// Time value
 #[repr(C)]
 #[derive(Debug)]
 pub struct TimeVal {
-    /// seconds
     pub sec: usize,
-    /// microseconds
     pub usec: usize,
 }
 
-/// Task information
-#[allow(dead_code)]
-#[derive(Copy, Clone)]
-pub struct TaskInfo {
-    /// Task status in it's life cycle
-    status: TaskStatus,
-    /// The numbers of syscall called by task
-    syscall_times: [u32; MAX_SYSCALL_NUM],
-    /// Total running time of task
-    time: usize,
-}
-
-impl TaskInfo {
-    /// new
-    pub fn new(status: TaskStatus) -> Self {
-        let syscall_times = [0; MAX_SYSCALL_NUM];
-        TaskInfo {
-            status,
-            syscall_times,
-            time: 0,
-        }
-    }
-    /// set_status
-    pub fn set_status(&mut self, status: TaskStatus) {
-        self.status = status;
-    }
-    /// syscall_counter
-    pub fn syscall_counter(&mut self, syscall: usize) {
-        if syscall < MAX_SYSCALL_NUM {
-            self.syscall_times[syscall] += 1;
-        }
-    }
-    /// increment_time
-    pub fn set_dispatch_time(&mut self, time: usize) {
-        self.time = time;
-    }
-}
 
 /// task exits and submit an exit code
 pub fn sys_exit(exit_code: i32) -> ! {
@@ -76,13 +35,11 @@ pub fn sys_yield() -> isize {
     0
 }
 
-/// get current pid
 pub fn sys_getpid() -> isize {
     trace!("kernel: sys_getpid pid:{}", current_task().unwrap().pid.0);
     current_task().unwrap().pid.0 as isize
 }
 
-/// fork
 pub fn sys_fork() -> isize {
     trace!("kernel:pid[{}] sys_fork", current_task().unwrap().pid.0);
     let current_task = current_task().unwrap();
@@ -98,7 +55,6 @@ pub fn sys_fork() -> isize {
     new_pid as isize
 }
 
-/// exec
 pub fn sys_exec(path: *const u8) -> isize {
     trace!("kernel:pid[{}] sys_exec", current_task().unwrap().pid.0);
     let token = current_user_token();
@@ -167,6 +123,7 @@ pub fn sys_get_time(ts: *const u8, _tz: usize) -> isize {
         sec: us / 1_000_000,
         usec: us % 1_000_000,
     };
+
     unsafe {
         *ts_ptr = time;
     }
@@ -185,6 +142,7 @@ pub fn sys_task_info(ti: *const u8) -> isize {
     let v = translated_byte_buffer(token, ti, 8);
     let ti_ptr = v[0].as_ptr() as *mut TaskInfo;
     let task_info = get_current_processor_info();
+
     unsafe {
         *ti_ptr = task_info;
     }
@@ -197,7 +155,7 @@ pub fn sys_mmap(start: usize, len: usize, port: usize) -> isize {
         "kernel:pid[{}] sys_mmap NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    get_current_processor_mmap(start, len, port)
+    current_processor_m_map(start, len, port)
 }
 
 /// YOUR JOB: Implement munmap.
@@ -206,7 +164,7 @@ pub fn sys_munmap(start: usize, len: usize) -> isize {
         "kernel:pid[{}] sys_munmap NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    get_current_processor_munmap(start, len)
+    current_processor_m_unmap(start, len)
 }
 
 /// change data segment size
@@ -239,22 +197,22 @@ pub fn sys_spawn(path: *const u8) -> isize {
         add_task(new_task);
         return new_pid as isize
     }
+
     -1
 }
 
 // YOUR JOB: Set task priority.
-/// set task priority
 pub fn sys_set_priority(prio: isize) -> isize {
     trace!(
         "kernel:pid[{}] sys_set_priority ",
         current_task().unwrap().pid.0
     );
 
-    let current_task = current_task().unwrap();
+    let mut current_task = current_task().unwrap();
     let mut task = current_task.inner_exclusive_access();
     if prio >= 2 {
         task.priority = prio;
-        0
+        prio
     } else {
         -1
     }

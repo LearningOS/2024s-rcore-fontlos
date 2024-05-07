@@ -273,8 +273,8 @@ where
 pub type VPNRange = SimpleRange<VirtPageNum>;
 
 impl VPNRange {
-    /// whether the VPN is within this VPNRange.
-    pub fn is_contain(&self, vpn: VirtPageNum) -> bool {
+    /// Check if the given virtual page number is within this VPNRange.
+    pub fn contains(&self, vpn: VirtPageNum) -> bool {
         vpn >= self.l && vpn <= self.r
     }
 }

@@ -4,13 +4,12 @@
 //! the current running state of CPU is recorded,
 //! and the replacement and transfer of control flow of different applications are executed.
 
-use super::__switch;
-use super::{fetch_task, TaskStatus};
+use super::{__switch, TaskInfo};
+use super::{fetch_task, TaskStatus, fetch_min_task};
 use super::{TaskContext, TaskControlBlock};
 use crate::sync::UPSafeCell;
-use crate::syscall::TaskInfo;
-use crate::timer::get_time_ms;
 use crate::trap::TrapContext;
+use crate::timer::get_time_ms;
 use alloc::sync::Arc;
 use lazy_static::*;
 
@@ -46,43 +45,43 @@ impl Processor {
     pub fn current(&self) -> Option<Arc<TaskControlBlock>> {
         self.current.as_ref().map(Arc::clone)
     }
-    /// update_task_info
+
     pub fn update_task_info(&mut self, syscall: usize, add_flag: bool) {
         let binding = self.current().unwrap();
         let mut task = binding.inner_exclusive_access();
         let task_status = task.task_status;
         task.task_info.set_status(task_status);
         if add_flag {
-            task.task_info.syscall_counter(syscall);
+            task.task_info.add_syscall_time(syscall);
         }
     }
-    /// get_current_task_info
+
     pub fn get_current_task_info(&mut self) -> TaskInfo {
         self.update_task_info(0,false);
         let binding = self.current().unwrap();
         let mut task = binding.inner_exclusive_access();
-        let start_time = task.start_time;
-        let dispatch_time = get_time_ms();
+        let task_start_time = task.task_start_time;
+        let increment_time = get_time_ms()-task_start_time;
         println!("[Kernel][Task] get_time_ms = {}", get_time_ms());
-        println!("[Kernel][Task] start_time = {}", start_time);
-        println!("[Kernel][Task] dispatch_time = {}", dispatch_time);
-        task.task_info.set_dispatch_time(dispatch_time);
+        println!("[Kernel][Task] task_start_time = {}", task_start_time);
+        println!("[Kernel][Task] increment_time = {}", increment_time);
+        task.task_info.increment_time(increment_time);
         let task_info = task.task_info;
         task_info
     }
-    /// current_task_mmap
-    pub fn get_current_task_mmap(&mut self, start: usize, len: usize, port: usize) -> isize {
-        println!("[Kernel][task/mod]mmap");
+
+    pub fn current_task_m_map(&mut self, start: usize, len: usize, port: usize) -> isize {
+        println!("[Kernel][task/mod]m_map");
         let binding = self.current().unwrap();
         let mut task = binding.inner_exclusive_access();
-        task.mmap(start, len, port)
+        task.m_map(start, len, port)
     }
-    /// current_task_munmap
-    pub fn get_current_task_munmap(&mut self, start: usize, len: usize) -> isize {
-        println!("[Kernel][task/mod]munmap");
+
+    pub fn current_task_m_unmap(&mut self, start: usize, len: usize) -> isize {
+        println!("[Kernel][task/mod]m_unmap");
         let binding = self.current().unwrap();
         let mut task = binding.inner_exclusive_access();
-        task.munmap(start, len)
+        task.m_unmap(start, len)
     }
 }
 
@@ -95,7 +94,7 @@ lazy_static! {
 pub fn run_tasks() {
     loop {
         let mut processor = PROCESSOR.exclusive_access();
-        if let Some(task) = fetch_task() {
+        if let Some(task) = fetch_min_task() {
             let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
             // access coming task TCB exclusively
             let mut task_inner = task.inner_exclusive_access();
@@ -150,22 +149,18 @@ pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
     }
 }
 
-/// get_current_processor_info
 pub fn get_current_processor_info() -> TaskInfo {
     PROCESSOR.exclusive_access().get_current_task_info()
 }
 
-/// add_processor_syscall_times
-pub fn processor_syscall_counter(syscall: usize){
+pub fn add_processor_syscall_times(syscall: usize){
     PROCESSOR.exclusive_access().update_task_info(syscall, true);
 }
 
-/// current_processor_m_map
-pub fn get_current_processor_mmap(start: usize, len: usize, port: usize) -> isize {
-    PROCESSOR.exclusive_access().get_current_task_mmap(start, len, port)
+pub fn current_processor_m_map(start: usize, len: usize, port: usize) -> isize {
+    PROCESSOR.exclusive_access().current_task_m_map(start, len, port)
 }
 
-/// current_processor_m_unmap
-pub fn get_current_processor_munmap(start: usize, len: usize) -> isize {
-    PROCESSOR.exclusive_access().get_current_task_munmap(start, len)
+pub fn current_processor_m_unmap(start: usize, len: usize) -> isize {
+    PROCESSOR.exclusive_access().current_task_m_unmap(start, len)
 }
