@@ -127,7 +127,7 @@ impl PageTable {
     }
     /// set the map between virtual page number and physical page number
     #[allow(unused)]
-    pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) -> isize{
+    pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) -> isize {
         let pte = self.find_pte_create(vpn).unwrap();
         if pte.is_valid() {
             println!("vpn {:?} is mapped before mapping", vpn);
