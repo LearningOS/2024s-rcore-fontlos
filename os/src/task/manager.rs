@@ -11,7 +11,6 @@ use lazy_static::*;
 ///A array of `TaskControlBlock` that is thread-safe
 pub struct TaskManager {
     ready_queue: VecDeque<Arc<TaskControlBlock>>,
-    
     /// The stopping task, leave a reference so that the kernel stack will not be recycled when switching tasks
     stop_task: Option<Arc<TaskControlBlock>>,
 }
@@ -31,15 +30,57 @@ impl TaskManager {
     }
     /// Take a process out of the ready queue
     pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
+        let mut task_to_remove = None;
+        for (index, task) in self.ready_queue.iter().enumerate() {
+            let tid = task
+                .inner_exclusive_access()
+                .res
+                .as_ref()
+                .unwrap()
+                .tid;
+            let process = task.process.upgrade().unwrap();
+            let mut process_inner = process.inner_exclusive_access();
+
+            // println!("[kernel][manager][fetch_work] sys_mutex_lock process_inner.available[0] = {}", process_inner.available[0]);
+
+            if process_inner.finish[tid] == false && process_inner.work[0] >= process_inner.need[tid][0] && process_inner.work[1] >= process_inner.need[tid][1] {
+                process_inner.work[0] -= process_inner.need[tid][0];
+                process_inner.work[1] -= process_inner.need[tid][1];
+                process_inner.allocation[tid][0] += process_inner.need[tid][0];
+                process_inner.allocation[tid][1] += process_inner.need[tid][1];
+                process_inner.need[tid][0] = 0;
+                process_inner.need[tid][1] = 0;
+                task_to_remove = Some(index);
+                break;
+            }
+        }
+
+        if let Some(index) = task_to_remove {
+            let task = Some(self.ready_queue[index].clone());
+            self.ready_queue.remove(index);
+            return task;
+        }
         self.ready_queue.pop_front()
     }
     pub fn remove(&mut self, task: Arc<TaskControlBlock>) {
-        if let Some((id, _)) = self
+        if let Some((id, t)) = self
             .ready_queue
             .iter()
             .enumerate()
             .find(|(_, t)| Arc::as_ptr(t) == Arc::as_ptr(&task))
         {
+            let tid = t
+                .inner_exclusive_access()
+                .res
+                .as_ref()
+                .unwrap()
+                .tid;
+            let process = task.process.upgrade().unwrap();
+            let mut process_inner = process.inner_exclusive_access();
+
+            process_inner.work[0] += process_inner.allocation[tid][0];
+            process_inner.work[1] += process_inner.allocation[tid][1];
+            process_inner.finish[tid] = true;
             self.ready_queue.remove(id);
         }
     }
