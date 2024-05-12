@@ -390,7 +390,7 @@ impl MapArea {
     }
     pub fn map(&mut self, page_table: &mut PageTable) -> isize {
         for vpn in self.vpn_range {
-            if self.map_one(page_table, vpn) != 0{
+            if self.map_one(page_table, vpn) != 0 {
                 return -1;
             }
         }

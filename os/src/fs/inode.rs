@@ -23,6 +23,7 @@ pub struct OSInode {
     readable: bool,
     writable: bool,
     stat: Stat,
+    name: String,
     inner: UPSafeCell<OSInodeInner>,
 }
 /// The OS inode inner in 'UPSafeCell'
@@ -36,18 +37,19 @@ pub struct Link {
     link: String,
 }
 
-pub struct LinkManager{
-    links: VecDeque<Arc<Link>>
+pub struct LinkManager {
+    links: VecDeque<Arc<Link>>,
 }
 
 impl OSInode {
     /// create a new inode in memory
-    pub fn new(readable: bool, writable: bool, inode: Arc<Inode>, ino: u64, nlink: u32,stat_mode: StatMode) -> Self {
+    pub fn new(readable: bool, writable: bool, inode: Arc<Inode>, ino: u64, nlink: u32,stat_mode: StatMode, name: String) -> Self {
         Self {
             readable,
             writable,
             inner: unsafe { UPSafeCell::new(OSInodeInner { offset: 0, inode }) },
             stat: Stat::new(ino, nlink, stat_mode),
+            name,
         }
     }
     /// read all data from the inode
@@ -79,6 +81,7 @@ pub fn list_apps() {
     println!("/**** APPS ****");
     for app in ROOT_INODE.ls() {
         println!("{}", app);
+        LINK_MANAGER.exclusive_access().add(app.clone().as_str(), "test");
     }
     println!("**************/");
 }
@@ -117,26 +120,30 @@ impl OpenFlags {
 pub fn open_file(name: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
     let (readable, writable) = flags.read_write();
 
-    let link_manager = LINK_MANAGER.exclusive_access();
-    let (name, nlink, index)= link_manager.all(name);
+    let mut link_manager = LINK_MANAGER.exclusive_access();
+    let (name, nlink, index)= link_manager.all(name, flags.clone());
     if flags.contains(OpenFlags::CREATE) {
         if let Some(inode) = ROOT_INODE.find(name) {
             // clear size
             inode.clear();
-            Some(Arc::new(OSInode::new(readable, writable, inode, index as u64, nlink as u32, StatMode::FILE)))
+            Some(Arc::new(OSInode::new(readable, writable, inode, index as u64, nlink as u32, StatMode::FILE, String::from(name))))
         } else {
             // create file
             ROOT_INODE
                 .create(name)
-                .map(|inode| Arc::new(OSInode::new(readable, writable, inode, index as u64, nlink as u32, StatMode::FILE)))
+                .map(|inode| Arc::new(OSInode::new(readable, writable, inode, index as u64, nlink as u32, StatMode::FILE, String::from(name))))
         }
     } else {
+        if nlink != 0 {
         ROOT_INODE.find(name).map(|inode| {
             if flags.contains(OpenFlags::TRUNC) {
                 inode.clear();
             }
-            Arc::new(OSInode::new(readable, writable, inode, index as u64, nlink as u32, StatMode::FILE))
+            Arc::new(OSInode::new(readable, writable, inode, index as u64, nlink as u32, StatMode::FILE, String::from(name)))
         })
+        } else {
+            None
+        }
     }
 }
 
@@ -171,11 +178,17 @@ impl File for OSInode {
         }
         total_write_size
     }
-    fn stat(& self) -> Stat {
-        self.stat.clone()
+
+    fn stat(&self) -> Stat {
+        let mut stat = self.stat.clone();
+        let name = self.name.as_str();
+        let mut link_manager = LINK_MANAGER.exclusive_access();
+        let (_, nlink, index)= link_manager.all(name, OpenFlags::RDWR);
+        stat.nlink = nlink as u32;
+        stat.ino = index as u64;
+        stat
     }
 }
-
 
 impl LinkManager {
     pub fn new() -> Self {
@@ -184,20 +197,25 @@ impl LinkManager {
         }
     }
 
-    pub fn all<'a>(&'a self, name: &'a str) -> (&'a str, usize, usize) {
+    pub fn all<'a>(&'a mut self, name: &'a str, flags: OpenFlags) -> (&'a str, usize, usize) {
+        if flags.contains(OpenFlags::CREATE) {
+            println!("[Kernel][link]all , add:{}", name);
+            self.add(name, "test");
+        }
         let fetched_name = self.fetch(name);
         let nlink = self.find_num(&fetched_name);
         let index = self.find_index(&fetched_name);
         (fetched_name, nlink, index)
     }
-    pub fn add(&mut self, target: &str, name: &str) -> isize {
-        if target == name {
+
+    pub fn add(&mut self, target: &str, link: &str) -> isize {
+        if target == link {
             return -1;
         }
 
         let link = Link {
             target: target.parse().unwrap(),
-            link: name.parse().unwrap(),
+            link: link.parse().unwrap(),
         };
         self.links.push_back(Arc::from(link));
         0
@@ -205,18 +223,21 @@ impl LinkManager {
 
     pub fn remove(&mut self, name: &str) -> isize {
         let mut result: isize = -1;
-        let mut indices_to_remove = Vec::new();
+        let mut remove_index: usize = 0;
 
         for (index, link) in self.links.iter().enumerate() {
             let target = link.target.as_str();
             let link = link.link.as_str();
-            if target == name || link == name {
-                indices_to_remove.push(index);
+            if target == name || link == name  {
+                remove_index = index;
                 result = 0;
+                println!("find remove_index is {}, target = {}, link = {}", remove_index, target, link);
+                break;
             }
         }
-        for index in indices_to_remove.iter().rev() {
-            self.links.remove(*index);
+
+        if result == 0 {
+            self.links.remove(remove_index);
         }
 
         result
@@ -240,13 +261,12 @@ impl LinkManager {
         if count == 0 {
             println!("[Kernel][fs][inode] Not fetch the link in LINK_MANAGER");
         }
-
-        count + 1
+        count
     }
 
     pub fn find_index(&self, name: &str) -> usize {
-        if let Some(index) = self.links.iter().position(|link_name| {
-            Arc::clone(link_name).target == name
+        if let Some(index) = self.links.iter().position(|link| {
+            Arc::clone(link).target == name
         }) {
             return index;
         } else {
