@@ -19,7 +19,6 @@ mod manager;
 mod processor;
 mod switch;
 #[allow(clippy::module_inception)]
-#[allow(rustdoc::private_intra_doc_links)]
 mod task;
 
 use crate::fs::{open_file, OpenFlags};
@@ -28,12 +27,14 @@ pub use context::TaskContext;
 use lazy_static::*;
 pub use manager::{fetch_task, TaskManager};
 use switch::__switch;
-pub use task::{TaskControlBlock, TaskStatus};
+pub use task::{TaskControlBlock, TaskStatus, TaskInfo};
 
 pub use id::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
 pub use manager::add_task;
 pub use processor::{
     current_task, current_trap_cx, current_user_token, run_tasks, schedule, take_current_task,
+    get_current_processor_info, get_current_processor_munmap, get_current_processor_mmap,
+    processor_syscall_counter,
     Processor,
 };
 /// Suspend the current 'Running' task and run the next task in task list.
@@ -93,8 +94,6 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     inner.children.clear();
     // deallocate user space
     inner.memory_set.recycle_data_pages();
-    // drop file descriptors
-    inner.fd_table.clear();
     drop(inner);
     // **** release current PCB
     // drop task manually to maintain rc correctly

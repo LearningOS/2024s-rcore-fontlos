@@ -4,10 +4,11 @@
 //! the current running state of CPU is recorded,
 //! and the replacement and transfer of control flow of different applications are executed.
 
-use super::__switch;
+use super::{__switch, TaskInfo};
 use super::{fetch_task, TaskStatus};
 use super::{TaskContext, TaskControlBlock};
 use crate::sync::UPSafeCell;
+use crate::timer::get_time_ms;
 use crate::trap::TrapContext;
 use alloc::sync::Arc;
 use lazy_static::*;
@@ -43,6 +44,44 @@ impl Processor {
     ///Get current task in cloning semanteme
     pub fn current(&self) -> Option<Arc<TaskControlBlock>> {
         self.current.as_ref().map(Arc::clone)
+    }
+    /// update_task_info
+    pub fn update_task_info(&mut self, syscall: usize, add_flag: bool) {
+        let binding = self.current().unwrap();
+        let mut task = binding.inner_exclusive_access();
+        let task_status = task.task_status;
+        task.task_info.set_status(task_status);
+        if add_flag {
+            task.task_info.syscall_counter(syscall);
+        }
+    }
+    /// get_current_task_info
+    pub fn get_current_task_info(&mut self) -> TaskInfo {
+        self.update_task_info(0,false);
+        let binding = self.current().unwrap();
+        let mut task = binding.inner_exclusive_access();
+        let start_time = task.start_time;
+        let dispatch_time = get_time_ms()-start_time;
+        println!("[Kernel][Task] get_time_ms = {}", get_time_ms());
+        println!("[Kernel][Task] start_time = {}", start_time);
+        println!("[Kernel][Task] dispatch_time = {}", dispatch_time);
+        task.task_info.set_dispatch_time(dispatch_time);
+        let task_info = task.task_info;
+        task_info
+    }
+    /// current_task_mmap
+    pub fn get_current_task_mmap(&mut self, start: usize, len: usize, port: usize) -> isize {
+        println!("[Kernel][task/mod]mmap");
+        let binding = self.current().unwrap();
+        let mut task = binding.inner_exclusive_access();
+        task.mmap(start, len, port)
+    }
+    /// current_task_munmap
+    pub fn get_current_task_munmap(&mut self, start: usize, len: usize) -> isize {
+        println!("[Kernel][task/mod]munmap");
+        let binding = self.current().unwrap();
+        let mut task = binding.inner_exclusive_access();
+        task.munmap(start, len)
     }
 }
 
@@ -108,4 +147,24 @@ pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
     unsafe {
         __switch(switched_task_cx_ptr, idle_task_cx_ptr);
     }
+}
+
+/// get_current_processor_info
+pub fn get_current_processor_info() -> TaskInfo {
+    PROCESSOR.exclusive_access().get_current_task_info()
+}
+
+/// add_processor_syscall_times
+pub fn processor_syscall_counter(syscall: usize){
+    PROCESSOR.exclusive_access().update_task_info(syscall, true);
+}
+
+/// current_processor_m_map
+pub fn get_current_processor_mmap(start: usize, len: usize, port: usize) -> isize {
+    PROCESSOR.exclusive_access().get_current_task_mmap(start, len, port)
+}
+
+/// current_processor_m_unmap
+pub fn get_current_processor_munmap(start: usize, len: usize) -> isize {
+    PROCESSOR.exclusive_access().get_current_task_munmap(start, len)
 }

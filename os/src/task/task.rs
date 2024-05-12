@@ -1,15 +1,16 @@
 //! Types related to task management & Functions for completely changing TCB
 use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
-use crate::config::TRAP_CONTEXT_BASE;
+use crate::config::{TRAP_CONTEXT_BASE, MAX_SYSCALL_NUM};
 use crate::fs::{File, Stdin, Stdout};
-use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
+use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE, MapPermission};
 use crate::sync::UPSafeCell;
 use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefMut;
+use crate::timer::get_time_ms;
 
 /// Task control block structure
 ///
@@ -35,6 +36,43 @@ impl TaskControlBlock {
     pub fn get_user_token(&self) -> usize {
         let inner = self.inner_exclusive_access();
         inner.memory_set.token()
+    }
+}
+
+#[derive(Copy, Clone)]
+pub struct TaskInfo {
+    /// Task status in it's life cycle
+    status: TaskStatus,
+    /// The numbers of syscall called by task
+    syscall_times: [u32; MAX_SYSCALL_NUM],
+    /// Total running time of task
+    time: usize,
+}
+
+impl TaskInfo {
+    pub fn new(status: TaskStatus) -> Self {
+        // Initialize syscall_times with zeros.
+        let syscall_times = [0; MAX_SYSCALL_NUM];
+        // Assuming TaskStatus::Running is a reasonable default.
+        TaskInfo {
+            status,
+            syscall_times,
+            time: 0,
+        }
+    }
+
+    pub fn set_status(&mut self, status: TaskStatus) {
+        self.status = status;
+    }
+
+    pub fn syscall_counter(&mut self, index: usize) {
+        if index < MAX_SYSCALL_NUM {
+            self.syscall_times[index] += 1;
+        }
+    }
+
+    pub fn set_dispatch_time(&mut self, time: usize) {
+        self.time = time;
     }
 }
 
@@ -71,6 +109,10 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+    pub task_info: TaskInfo,
+    pub start_time: usize,
+    pub priority: isize,
+    pub stride: isize,
 }
 
 impl TaskControlBlockInner {
@@ -92,6 +134,20 @@ impl TaskControlBlockInner {
         } else {
             self.fd_table.push(None);
             self.fd_table.len() - 1
+        }
+    }
+    pub fn mmap(&mut self, start: usize, len: usize, port: usize) -> isize {
+        if start % 4096 == 0 && (port & !0x7 == 0) && (port & 0x7 != 0) {
+            self.memory_set.insert_framed_area(VirtAddr::from(start), VirtAddr::from(start + len), MapPermission::from_usize((port << 1) | 0x18))
+        } else {
+            -1
+        }
+    }
+    pub fn munmap(&mut self, start: usize, len: usize) -> isize {
+        if start % 4096 == 0 && len % 4096 == 0 {
+            self.memory_set.remove_area(VirtAddr::from(start), VirtAddr::from(start + len))
+        } else {
+            -1
         }
     }
 }
@@ -135,6 +191,10 @@ impl TaskControlBlock {
                     ],
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    task_info: TaskInfo::new(TaskStatus::Ready),
+                    start_time: 0,
+                    priority: 16,
+                    stride: 0,
                 })
             },
         };
@@ -216,6 +276,10 @@ impl TaskControlBlock {
                     fd_table: new_fd_table,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    task_info: TaskInfo::new(TaskStatus::Ready),
+                    start_time: get_time_ms(),
+                    priority: 16,
+                    stride: 0,
                 })
             },
         });
